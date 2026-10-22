@@ -1,0 +1,21 @@
+# 构建产物
+build-host/
+build-device/
+dist/
+
+# 测试生成物（mock 设备树，由 mock_tree.sh 动态生成）
+test/mock/
+
+# 开发缓存
+.codebuddy/
+
+# 预编译二进制（通过 GitHub Releases 分发，不进源码仓库）
+libs/arm64-v8a/xindiaodud
+
+# 编译中间产物
+*.o
+*.d
+
+# 临时文件
+*.testbak
+*.tmp

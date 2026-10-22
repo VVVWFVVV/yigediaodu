@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>一个调度</title>
+<link rel="stylesheet" href="assets/app.css?v=1.0.5">
+<script>
+// 全局错误出口：必须最早注册，且自身不依赖任何后续模块
+// 目的：任何脚本加载失败或运行时异常，都在界面上留下可读原因，而不是白屏
+(function () {
+  var shown = {};
+  function show(msg) {
+    try {
+      var bar = document.getElementById('fc-errbar');
+      if (!bar) return;
+      bar.style.display = 'flex';
+      var t = document.getElementById('fc-errbar-text');
+      if (t) t.textContent = msg;
+    } catch (e) {}
+  }
+  window.__fc_show_error = show;
+  window.addEventListener('error', function (e) {
+    var key = 'err:' + (e.message || 'unknown');
+    if (shown[key]) return;
+    shown[key] = 1;
+    show('页面脚本出错：' + (e.message || e.type));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    show('请求被拒绝：' + ((r && r.message) ? r.message : String(r)));
+  });
+  // 启动看门狗：约定时间内首屏仍是占位，强制给出可读提示
+  setTimeout(function () {
+    var view = document.getElementById('fc-view');
+    if (view && view.getAttribute('data-loaded') !== '1') {
+      show('面板启动超时：root 通道可能未就绪，可到「自检」页逐条排查');
+    }
+  }, 8000);
+})();
+</script>
+</head>
+<body>
+
+<!-- 顶部状态栏 -->
+<header id="fc-topbar" class="fc-topbar">
+  <div class="fc-topbar-left">
+    <span class="fc-logo">一个调度</span>
+    <span id="fc-version" class="fc-version"></span>
+  </div>
+  <div class="fc-topbar-right">
+    <span id="fc-daemon-badge" class="fc-badge fc-badge-muted">守护 —</span>
+    <label class="fc-switch" title="全局开关">
+      <input type="checkbox" id="fc-enabled" checked>
+      <span class="fc-switch-slider"></span>
+    </label>
+  </div>
+</header>
+
+<!-- 常驻错误提示条 -->
+<div id="fc-errbar" class="fc-errbar" style="display:none">
+  <span class="fc-errbar-icon">!</span>
+  <span id="fc-errbar-text" class="fc-errbar-text"></span>
+  <button id="fc-errbar-close" class="fc-errbar-close" title="关闭">×</button>
+</div>
+
+<!-- 内容区 -->
+<main id="fc-view" class="fc-view" data-loaded="0"></main>
+
+<!-- 底部标签 -->
+<nav id="fc-tabs" class="fc-tabs">
+  <button class="fc-tab" data-route="overview">总览</button>
+  <button class="fc-tab" data-route="apps">应用</button>
+  <button class="fc-tab" data-route="settings">设置</button>
+  <button class="fc-tab" data-route="diag">自检</button>
+</nav>
+
+<script src="assets/bridge.js?v=1.0.5"></script>
+<script src="assets/api.js?v=1.0.5"></script>
+<script src="assets/app.js?v=1.0.5"></script>
+<script src="assets/pages.js?v=1.0.5"></script>
+<script src="assets/page-settings.js?v=1.0.5"></script>
+<script src="assets/page-diag.js?v=1.0.5"></script>
+<script>
+// 全部脚本就绪后启动
+if (window.FC && FC.app && typeof FC.app.boot === 'function') {
+  FC.app.boot();
+} else if (window.__fc_show_error) {
+  window.__fc_show_error('面板脚本加载不完整，请重新安装模块');
+}
+</script>
+</body>
+</html>

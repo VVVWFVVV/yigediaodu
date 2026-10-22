@@ -1,0 +1,8 @@
+# 强制 LF 行尾（Android 脚本必须 LF；CRLF 会导致刷入失败）
+* text=auto eol=lf
+
+# 二进制文件
+*.png binary
+*.jpg binary
+*.zip binary
+libs/arm64-v8a/xindiaodud binary

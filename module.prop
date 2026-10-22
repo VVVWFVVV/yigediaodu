@@ -1,0 +1,6 @@
+id=WY925976742
+name=一个调度
+version=v1.0.16
+versionCode=17
+author=晚吟
+description=日用省电与游戏稳帧双场景调度｜GPU 频率下限(抹深 dip) · 每游戏独立稳帧阶梯 · 游戏启动缓存释放+dirty 调优 · 频率吸附 · UE4/Unity TaskGraph 全变体绑核 · per-app 独立调优 · cpuset v1/v2 自适应 · SELinux 瞬时 permissive · 防冻结+看门狗
