@@ -184,7 +184,7 @@ case "$1" in
 ** Graphics info for package 'com.tencent.tmgp.sgame' (pid 1234) **
 Stats since: 1234567890ns
 Total frames rendered: 600
-Janky frames: 6 (1.00%)
+Janky frames: 36 (6.00%)
 50th percentile: 16667ms
 90th percentile: 17000ms
 95th percentile: 18000ms

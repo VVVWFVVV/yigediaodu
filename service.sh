@@ -110,13 +110,16 @@ for p in /proc/[0-9]*; do
     pid="${p#/proc/}"
     [ "$pid" = "$$" ] && continue
     [ "$pid" = "$PPID" ] && continue
-    # 只杀本模块的守护二进制与旧版监督者：xindiaodud（守护二进制名，
-    # v1.0.16 起模块 id 改为 WY925976742 但二进制名保留）或
+    # 只杀本模块的守护二进制、捆绑的 fas-rs 与旧版监督者：
+    # xindiaodud（守护二进制名，v1.0.16 起模块 id 改为 WY925976742
+    # 但二进制名保留）、fas-rs（v1.0.17 捆绑的帧感知调度——监督者重启时
+    # 杀掉孤儿，让 daemon 用最新 games.toml 重新拉起）、
     # xindiaodu+service.sh（v1.0.16 之前的旧 id 监督者——若用户没按
     # 提示先卸载旧版，这里兜底接管，防止两个调度互相杀）。
     # 不能宽匹配 service.sh——其它模块的常驻 service.sh 会被误杀！
     # （NUL 分隔，grep -a 处理）
     if grep -aq "xindiaodud" "$p/cmdline" 2>/dev/null || \
+       grep -aq "fas-rs" "$p/cmdline" 2>/dev/null || \
        { grep -aq "xindiaodu" "$p/cmdline" 2>/dev/null && \
          grep -aq "service\.sh" "$p/cmdline" 2>/dev/null; }; then
         kill -TERM "$pid" 2>/dev/null

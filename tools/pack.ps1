@@ -137,7 +137,7 @@ try {
         if ($_.Name -like '._*') { return }
         # 条目名强制正斜杠（ZipFile.CreateFromDirectory 在 .NET Framework 下会写反斜杠）
         $entry = $archive.CreateEntry($rel.Replace('\', '/'), [System.IO.Compression.CompressionLevel]::Optimal)
-        if ($_.Extension -eq '.sh' -or $_.Name -eq 'update-binary' -or $_.Name -eq 'xindiaodud') {
+        if ($_.Extension -eq '.sh' -or $_.Name -eq 'update-binary' -or $_.Name -eq 'xindiaodud' -or $_.Name -eq 'fas-rs') {
             Set-ZipUnixMode $entry ([uint32]([uint32]33261 * [uint32]65536))   # 0755
         } else {
             Set-ZipUnixMode $entry ([uint32]([uint32]33188 * [uint32]65536))   # 0644

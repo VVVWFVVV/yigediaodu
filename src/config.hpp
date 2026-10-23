@@ -24,7 +24,8 @@ bool conf_get(const Conf& kv, const std::string& key, std::string& out);
 std::string conf_get_or(const Conf& kv, const std::string& key, const std::string& def);
 bool conf_has(const Conf& kv, const std::string& key);
 
-// 模块配置寻址（均经 nd_path 前缀化；模块目录由 module_dir() 解析）
+// 模块配置寻址（模块自身文件：真实路径，不经 nd_path 前缀化——
+// XD_ROOT 前缀只用于设备状态路径；详见 config.cpp 顶部约定）
 std::string settings_path();
 std::string profile_path(const std::string& name);
 std::string perapp_path(const std::string& pkg);

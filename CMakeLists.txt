@@ -1,5 +1,5 @@
 # ============================================================
-# 新调度 · 双构建（host / device 同源）
+# 一个调度 · 双构建（host / device 同源）
 #   host   ：WSL2 Ubuntu g++，跑模拟设备树测试
 #   device ：NDK 交叉编译 aarch64-linux-android，静态 libc++
 # 用法：

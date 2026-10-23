@@ -42,6 +42,9 @@ bool thermal_tick(const ThermalConfig& cfg, const std::vector<PolicyInfo>& polic
 int fps_current_level();
 bool thermal_capped();
 
+// 最近一次卡顿率（百分比，-1=无数据）；fas 模式仲裁用
+double fps_last_jank();
+
 // 当前稳帧阶梯摘要（诊断/测试用）："p0:384000,1152000|p1:1017600,..."
 std::string fps_steps_summary();
 

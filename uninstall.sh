@@ -42,6 +42,13 @@ else
     echo " 一个调度：守护二进制缺失，跳过节点还原（重启后内核节点自动恢复默认）"
 fi
 
+# fas-rs 兜底清理（v1.0.17）：守护进程退出时会杀它，这里是双保险
+if [ -f "$XDD_STATE/fas.pid" ]; then
+    FPID=$(cat "$XDD_STATE/fas.pid" 2>/dev/null)
+    [ -n "$FPID" ] && kill -9 "$FPID" 2>/dev/null
+fi
+killall fas-rs 2>/dev/null
+
 rm -rf "$XDD_HOME" 2>/dev/null
 echo " 一个调度：运行时目录已清理，卸载完成"
 exit 0

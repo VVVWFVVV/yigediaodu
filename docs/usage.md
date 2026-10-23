@@ -85,6 +85,24 @@ thread.bind.GameThread=0-5
 - `thread.bind.<线程名前缀>=<CPU列表>`：线程绑核
 - `fps.steps.p0` / `fps.steps.p1`：**每游戏独立稳帧阶梯**（覆盖全局 settings.conf 阶梯；逗号分隔）
 - `fps.enable` / `fps.sample_ms` / `fps.jank_threshold` / `fps.hold_ms`：稳帧参数（per-app 可覆盖全局）
+- `fas.enable`：`1`=该应用的频率维度交给 **fas-rs 帧感知调度**（见下）
+- `fas.target_fps`：目标帧率（30-240，fas-rs 按实际渲染帧率动态匹配）
+
+### FAS 帧感知调度（v1.0.17）
+
+捆绑 [fas-rs](https://github.com/shadow3aaa/fas-rs)（eBPF 版，GPL-3.0）——监视实际渲染帧、在帧 deadline 前预调频率，比 jank% 反应式阶梯更精准。**分层不重叠**：
+
+| 层 | 负责方 |
+|---|---|
+| 频率维度（`scaling_min_freq`） | fas-rs（`fas.enable=1` 的应用） |
+| 绑核 / cpuset / IO / 内存 / 温控 / GPU | 本模块（始终） |
+
+- **配置桥**：per-app 的 `fas.enable`/`fas.target_fps` 由守护进程自动生成 fas-rs 的 `games.toml`（运行时目录 `config/fas_games.toml`），无需手改
+- **模式仲裁**：温控触发 → `powersave`；连续 3 次采样卡顿超标 → `performance`；否则 `balance`（写 `/dev/fas_rs/mode`）
+- **让位条件**是「当前应用 fas 托管」而非「fas-rs 在跑」——非 fas 应用（如 PUBG 默认关）即使 fas-rs 空闲运行也走我们的阶梯
+- **回退**：内核不支持 eBPF 时 fas-rs 启动失败，自动回退内置稳帧阶梯（日志可见）
+- 面板总览「实时」卡片的「帧感知」字段显示接管状态与当前模式
+- **PUBG 默认 `fas.enable=0`**（反作弊体系复杂，保守默认；eBPF 版无 hook，想试手动改 1）
 
 ## 前台识别
 

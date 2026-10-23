@@ -11,6 +11,7 @@
 
 #include "config.hpp"
 #include "engine.hpp"
+#include "fas.hpp"
 #include "log.hpp"
 #include "paths.hpp"
 #include "shell.hpp"
@@ -30,7 +31,7 @@ std::vector<std::string> g_saved_max_freq;
 Clock::time_point g_last_sample{};
 int g_level = 0;
 long long g_level_since_ms = 0;
-double g_last_jank = 0.0;
+double g_last_jank = -1.0;  // -1=尚无采样数据
 bool g_capped = false;
 
 long long now_ms() {
@@ -173,11 +174,13 @@ void fps_tick(const std::string& pkg, const FpsConfig& cfg,
     if (jank < 0) return;  // 输出没有帧统计（应用可能不在前台渲染）
     g_last_jank = jank;
 
-    // 决策：超阈值升档（立即）；低于阈值一半且保持窗口已过才降档（滞回防震荡）
+    // 决策：超阈值升档（保持窗口已过才升——防卡顿持续时几秒内冲到顶档）；
+    //       低于阈值一半且保持窗口已过才降档（滞回防震荡）
     size_t max_lv = max_level();
     bool changed = false;
     if (jank >= (double)cfg.jank_threshold) {
-        if (max_lv > 0 && (size_t)(g_level + 1) < max_lv) {
+        if (max_lv > 0 && (size_t)(g_level + 1) < max_lv &&
+            now_ms() - g_level_since_ms >= cfg.hold_ms) {
             ++g_level;
             g_level_since_ms = now_ms();
             changed = true;
@@ -196,17 +199,26 @@ void fps_tick(const std::string& pkg, const FpsConfig& cfg,
 
     // 落地：每策略组最低频 = 该组阶梯[当前档]；档 0 视为不干预
     if (changed || g_level > 0) {
-        for (size_t i = 0; i < policies.size() && i < g_steps.size(); ++i) {
-            const auto& steps = g_steps[i];
-            if (steps.empty()) continue;
-            long long f = steps[std::min((size_t)g_level, steps.size() - 1)];
-            if (f <= 0) continue;
-            // 频率吸附：阶梯值不在该策略组可用频率表时向上取整到合法值
-            // （v1.0.12 实测：非法值被内核钳位，稳帧调频全部失效）
-            long long snapped = snap_to_available_freq(policies[i].dir, f);
-            nd_write(policies[i].dir + "/scaling_min_freq", std::to_string(snapped));
+        if (freq_defer_fas()) {
+            // v1.0.17：当前应用交给 fas-rs（帧感知调度）管频率——
+            // 它监视实际渲染帧在 deadline 前预调，比我们的反应式阶梯更精准。
+            // 我们仍统计卡顿（供 WebUI 与模式仲裁），但不写 scaling_min_freq。
+            // 注意条件是「当前应用 fas 托管」而非「fas-rs 进程在跑」——
+            // 非 fas 游戏（如 PUBG 默认关）即使 fas-rs 空闲运行也走我们的阶梯。
+            set_capability("fps", "fas");
+        } else {
+            for (size_t i = 0; i < policies.size() && i < g_steps.size(); ++i) {
+                const auto& steps = g_steps[i];
+                if (steps.empty()) continue;
+                long long f = steps[std::min((size_t)g_level, steps.size() - 1)];
+                if (f <= 0) continue;
+                // 频率吸附：阶梯值不在该策略组可用频率表时向上取整到合法值
+                // （v1.0.12 实测：非法值被内核钳位，稳帧调频全部失效）
+                long long snapped = snap_to_available_freq(policies[i].dir, f);
+                nd_write(policies[i].dir + "/scaling_min_freq", std::to_string(snapped));
+            }
+            set_capability("fps", "ok");
         }
-        set_capability("fps", "ok");
     }
 }
 
@@ -243,6 +255,9 @@ bool thermal_tick(const ThermalConfig& cfg, const std::vector<PolicyInfo>& polic
 
 int fps_current_level() { return g_level; }
 bool thermal_capped() { return g_capped; }
+
+// 最近一次卡顿率（-1=无数据）；fas 模式仲裁用
+double fps_last_jank() { return g_last_jank >= 0 ? g_last_jank : -1.0; }
 
 // 阶梯摘要："p0:384000,1152000|p1:1017600,..."（诊断/测试用）
 std::string fps_steps_summary() {

@@ -182,6 +182,60 @@ chk "退出后节点还原" sh -c "grep -q 384000 '$XD_ROOT/sys/devices/system/c
 chk "退出后基线清除" sh -c "[ ! -f '$XD_ROOT/data/adb/WY925976742/baseline/nodes.conf' ]"
 chk "退出后进程真正结束" sh -c "[ ! -d /proc/$DPID ]"
 
+say "fas 帧感知调度集成（v1.0.17）"
+# A/B 对照（host 模式前台恒为 mock /proc 里的 sgame——/proc 扫描优先于
+# dumpsys 桩，所以用 sgame 自身的 fas 开关做对照）：
+#   A. sgame fas.enable=1 + 模拟 /dev/fas_rs/mode 节点
+#      → 频率维度让位 fas-rs（policy0 不被写高）+ fps 能力标 fas + live FAS=1
+#   B. sgame fas.enable=0（临时改配置）+ mode 节点仍在（fas-rs 空闲运行）
+#      → 频率下限正常落地 + live FAS=0
+#      （证明让位条件是「应用托管」而非「fas-rs 进程在跑」）
+# 另验证 games.toml 配置桥：daemon 启动时扫描 perapp 自动生成。
+
+# ---- A：fas 托管（sgame fas.enable=1）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"*
+mkdir -p "$XD_ROOT/dev/fas_rs"
+echo balance > "$XD_ROOT/dev/fas_rs/mode"     # 模拟 fas-rs 运行中的模式节点
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDF=$!
+sleep 6
+chk "fas 托管时频率下限让位（policy0 保持 384000）" sh -c "grep -q 384000 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
+chk "fas 接管标记（fps=fas）" sh -c "grep -q 'fps=fas' '$XD_ROOT/data/adb/WY925976742/state/capability'"
+chk "live 快照 FAS=1" sh -c "grep -q 'FAS=1' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "games.toml 含原神（120fps 候选）" sh -c "grep -q 'com.miHoYo.Yuanshen.*30, 60, 90, 120' '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
+chk "games.toml 含方舟（60fps）" sh -c "grep -q 'com.hypergryph.arknights.*30, 60' '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
+chk "games.toml 含穿越火线" sh -c "grep -q 'com.tencent.tmgp.cf' '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
+chk "games.toml 不含 PUBG（fas 关）" sh -c "! grep -q pubgmhd '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
+chk "games.toml 不含哔哩哔哩（非游戏）" sh -c "! grep -q bili '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
+kill -TERM "$DPIDF" 2>/dev/null
+sleep 2
+chk "fas 托管 daemon 退出清理" sh -c "[ ! -d /proc/$DPIDF ]"
+
+# ---- probe fas（此时 toml 为 4 个托管应用）----
+chk "probe fas 输出托管应用数 4" sh -c "$BIN --probe fas | grep -q '\"managed\":4'"
+chk "probe fas 输出 toml 路径" sh -c "$BIN --probe fas | grep -q 'fas_games.toml'"
+
+# ---- B：非 fas 应用（sgame fas.enable=0 对照，fas-rs 仍空闲运行）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"*
+mkdir -p "$XD_ROOT/dev/fas_rs"
+echo balance > "$XD_ROOT/dev/fas_rs/mode"     # fas-rs 仍在跑，但当前应用未托管
+cp "$REPO/config/perapp/com.tencent.tmgp.sgame.conf" "$REPO/config/perapp/com.tencent.tmgp.sgame.conf.testbak"
+cat > "$REPO/config/perapp/com.tencent.tmgp.sgame.conf" <<'EOF'
+mode=game
+fas.enable=0
+EOF
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDF2=$!
+sleep 6
+chk "非 fas 应用频率下限正常落地（1152000）" sh -c "grep -q 1152000 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
+chk "非 fas 应用 CPU 能力 ok" sh -c "grep -q 'cpu=ok' '$XD_ROOT/data/adb/WY925976742/state/capability'"
+chk "live 快照 FAS=0" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
+kill -TERM "$DPIDF2" 2>/dev/null
+sleep 2
+mv "$REPO/config/perapp/com.tencent.tmgp.sgame.conf.testbak" "$REPO/config/perapp/com.tencent.tmgp.sgame.conf"
+
 say "单实例保护（flock）"
 # 第一个 daemon 持锁运行，第二个实例必须直接退出（双 daemon 会互相覆盖节点）
 "$BIN" --daemon >/dev/null 2>&1 &

@@ -133,10 +133,10 @@ const STATUS = JSON.stringify({
     caps: { cpu: 'ok', cpuset: 'ok', threads: 'ok', io: 'ok', mem: 'ok', thermal: 'off', fps: 'ok' }
   }
 });
-const LIST = JSON.stringify({ ok: true, data: [{ pkg: 'com.miHoYo.Yuanshen', mode: 'game' }] });
+const LIST = JSON.stringify({ ok: true, data: [{ pkg: 'com.miHoYo.Yuanshen', mode: 'game', fas: 1 }] });
 const SETTINGS_B64 = Buffer.from('enabled=1\npoll_interval_ms=1000\nfps.enable=1\n').toString('base64');
 const SETTINGS = JSON.stringify({ ok: true, data: SETTINGS_B64 });
-const LIVE = JSON.stringify({ ok: true, data: { PKG: 'com.tencent.tmgp.sgame', FAMILY: 'game', TEMP: '45', FREQ: '1152000,1958400', FPS_LEVEL: '1', THERM: '0' } });
+const LIVE = JSON.stringify({ ok: true, data: { PKG: 'com.tencent.tmgp.sgame', FAMILY: 'game', TEMP: '45', FREQ: '1152000,1958400', FPS_LEVEL: '1', THERM: '0', FAS: '1', FASMODE: 'balance' } });
 const LOGS_B64 = Buffer.from('10-18 17:00:00 [INFO] 测试日志\n').toString('base64');
 const LOGS = JSON.stringify({ ok: true, data: LOGS_B64 });
 const PROFILES = JSON.stringify({ ok: true, data: ['daily', 'daily-plus', 'game', 'bg', 'off'] });
