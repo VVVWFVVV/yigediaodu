@@ -10,6 +10,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -25,6 +27,35 @@ namespace xdd {
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
+
+// ==================== fas-rs 启动节流与状态管理 ====================
+// v1.0.18: 失败后进入 5 分钟冷却期，避免每轮切应用都重试导致刷屏
+static std::atomic<long long> g_fas_last_attempt_ms{0};
+// pending 启动的起始时刻（>0 表示有一次「已 fork 但节点未就绪」的启动在途）
+static std::atomic<long long> g_fas_pending_ms{0};
+static std::atomic<int> g_fas_pending_pid{0};
+static const long long FAS_RETRY_COOLDOWN_MS = 5 * 60 * 1000;  // 5 分钟
+static const long long FAS_START_TIMEOUT_MS = 5000;            // 单次启动等待节点上限 5 秒
+static const int FAS_MAX_FAILURES = 3;  // 连续失败阈值（超过则停止自动重试）
+
+// 读/写 fas.retry_count
+static int read_fas_retry_count() {
+    std::string path = nd_path("/data/adb/WY925976742/state/fas.retry_count");
+    std::ifstream f(path);
+    if (!f.is_open()) return 0;
+    int count = 0;
+    f >> count;
+    return count > 0 ? count : 0;
+}
+
+static void write_fas_retry_count(int count) {
+    std::string path = nd_path("/data/adb/WY925976742/state/fas.retry_count");
+    std::ofstream f(path);
+    if (f.is_open()) f << count << "\n";
+}
+
+// 清理孤儿进程（pid 文件存在但进程已结束）
 // per-app 配置目录（模块自身文件：真实路径，绝不加 XD_ROOT 前缀）
 std::string perapp_dir() { return module_dir() + "/config/perapp"; }
 
@@ -84,12 +115,36 @@ void write_fas_pid(int pid) {
     std::fclose(f);
 }
 
+// 清理孤儿进程（pid 文件存在但进程已结束）
+void cleanup_orphan_fas() {
+    int pid = read_fas_pid();
+    if (pid <= 0) return;
+    std::string proc_path = "/proc/" + std::to_string(pid) + "/cmdline";
+    if (!nd_exists(proc_path)) {
+        ::unlink(nd_path(kPidPath).c_str());
+        log_line(LogLevel::Info, "fas-rs 孤儿进程清理：pid " + std::to_string(pid) + " 已消失");
+    }
+}
+
 }  // namespace
 
 std::string fas_binary_path() { return module_dir() + "/libs/arm64-v8a/fas-rs"; }
 
 // 模块文件存在性：真实路径直查（module_dir 在两种模式下都是真实路径）
-bool fas_binary_exists() { return ::access(fas_binary_path().c_str(), F_OK) == 0; }
+// v1.0.18 修正：改用 X_OK 同时检查文件存在与执行权限；若存在但无执行位，
+// 自动 chmod 755 修复（KSU 安装后可能全 0644 真机实测），修复 fas-rs Permission denied
+bool fas_binary_exists() {
+    std::string path = fas_binary_path();
+    if (::access(path.c_str(), F_OK) != 0) return false;
+    if (::access(path.c_str(), X_OK) == 0) return true;
+    // 存在但不可执行 → 自动修复
+    if (::chmod(path.c_str(), 0755) == 0) {
+        log_line(LogLevel::Info, "fas-rs 权限自愈：已恢复执行位");
+        return true;
+    }
+    // chmod 失败则视为不可用
+    return false;
+}
 
 std::string fas_toml_path() { return kTomlPath; }
 
@@ -185,64 +240,134 @@ int fas_generate_toml() {
 
 bool fas_running() { return nd_exists(kModeNode); }
 
+// 检查 pending 启动状态：如果节点已就绪则清 pending；如果超时则记失败、清 pid。
+// 返回 true 表示「已在运行」，false 表示「未就绪/超时」。
+// 调用方可根据返回值决定是否记录失败计数（仅在真正超时失败时记）。
+bool fas_poll() {
+    if (fas_running()) {
+        // 节点就绪：仅当此前有 pending 启动时才记录一次（避免稳态刷屏）
+        if (g_fas_pending_ms.load() > 0) {
+            g_fas_pending_ms.store(0);
+            g_fas_pending_pid.store(0);
+            log_line(LogLevel::Info, "fas-rs 节点就绪，接管完成");
+        }
+        return true;
+    }
+
+    long long pending_ms = g_fas_pending_ms.load();
+    if (pending_ms <= 0) return false;  // 无 pending 启动
+
+    // 检查是否超时
+    long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        Clock::now().time_since_epoch())
+                        .count();
+    if ((now - pending_ms) >= FAS_START_TIMEOUT_MS) {
+        // 超时：清理 pid 文件，记录失败计数，清除 pending
+        int pid = g_fas_pending_pid.load();
+        ::unlink(nd_path(kPidPath).c_str());
+        if (pid > 0) {
+            ::kill((pid_t)pid, SIGKILL);
+            ::waitpid((pid_t)pid, nullptr, WNOHANG);
+        }
+        g_fas_pending_ms.store(0);
+        g_fas_pending_pid.store(0);
+        write_fas_retry_count(read_fas_retry_count() + 1);
+        log_line(LogLevel::Warn, "fas-rs 启动超时（5 秒内节点未就绪），回退内置稳帧阶梯");
+        return false;
+    }
+
+    // 仍在等待中，未超时
+    return false;
+}
+
+// 异步启动入口：立即返回，不阻塞主循环
+// 返回 true 表示「已发起启动」（pending 状态）或「已在运行」；false 表示「放弃/跳过」
 bool fas_start() {
     if (fas_running()) return true;
 
-    // host 模式（测试）不启动：真机二进制在模拟树上跑不起来（无 eBPF/
-    // 真 /dev），只会白等 3 秒超时还阻塞 daemon 启动。测试用 mock 树里的
-    // /dev/fas_rs/mode 节点直接模拟「fas-rs 在跑」即可。
+    // host 模式（测试）不启动
     if (host_mode()) return false;
 
+    // 1) 清理潜在孤儿进程
+    cleanup_orphan_fas();
+
+    // 2) 检查二进制
     std::string bin = fas_binary_path();
     if (!fas_binary_exists()) {
-        // 二进制未打进模块（构建时下载失败或用户裁剪）——静默回退
+        return false;  // 二进制不存在，静默回退
+    }
+
+    // 3) 节流检查：冷却期内直接返回 false（不打日志，避免刷屏）
+    long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        Clock::now().time_since_epoch())
+                        .count();
+    long long last = g_fas_last_attempt_ms.load();
+    if (last > 0 && (now - last) < FAS_RETRY_COOLDOWN_MS) {
+        return false;  // 仍在冷却期
+    }
+
+    // 4) 检查失败计数阈值
+    int failures = read_fas_retry_count();
+    if (failures >= FAS_MAX_FAILURES) {
+        log_line(LogLevel::Info, "fas-rs 已连续失败 " + std::to_string(FAS_MAX_FAILURES) +
+                                 " 次，本会话暂停自动启动（下次重启 daemon 重置）");
         return false;
     }
 
-    // 确保 games.toml 最新
+    // 5) 记录本次尝试时间
+    g_fas_last_attempt_ms.store(now);
+
+    // 6) 确保 toml 最新
     fas_generate_toml();
     if (!nd_exists(fas_toml_path())) {
         log_line(LogLevel::Warn, "fas games.toml 不存在，跳过 fas-rs 启动");
+        write_fas_retry_count(failures + 1);
         return false;
     }
 
-    // 接管前快照 min_freq 基线（只读），退出时还原
-    fas_snapshot_freq_baseline();
+    // 7) 备份 min_freq 基线（只在第一次启动时做）
+    static bool baseline_taken = false;
+    if (!baseline_taken) {
+        fas_snapshot_freq_baseline();
+        baseline_taken = true;
+    }
 
-    // fork + exec（子进程 setsid 脱离终端，stdout/stderr 重定向到日志）
+    // 8) 后台 fork+exec（父进程立即写入 pid，子进程独立运行）
     int logfd = ::open(nd_path(kLogPath).c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
     pid_t pid = ::fork();
     if (pid < 0) {
         if (logfd >= 0) ::close(logfd);
         log_line(LogLevel::Warn, "fas-rs fork 失败");
+        write_fas_retry_count(failures + 1);
         return false;
     }
     if (pid == 0) {
-        // 子进程
+        // 子进程：独立后台运行 fas-rs
         ::setsid();
         if (logfd >= 0) {
             ::dup2(logfd, STDOUT_FILENO);
             ::dup2(logfd, STDERR_FILENO);
             if (logfd > STDERR_FILENO) ::close(logfd);
         }
-        // 模块文件（二进制）真实路径；toml 是运行时路径，需 nd_path 前缀
         std::string toml_real = nd_path(fas_toml_path());
         ::execl(bin.c_str(), bin.c_str(), "run", toml_real.c_str(), (char*)nullptr);
         ::_exit(127);
     }
     if (logfd >= 0) ::close(logfd);
+
+    // 父进程立即写入 pid 文件（即使节点还未就绪），防止主循环重复启动
     write_fas_pid((int)pid);
 
-    // 等模式节点出现（fas-rs 就绪标志），最多 3 秒
-    for (int i = 0; i < 30; ++i) {
-        if (fas_running()) {
-            log_line(LogLevel::Info, "fas-rs 帧感知调度已启动（pid " + std::to_string((int)pid) + "）");
-            return true;
-        }
-        ::usleep(100 * 1000);
-    }
-    log_line(LogLevel::Warn, "fas-rs 启动超时（内核 eBPF 支持？），回退内置稳帧阶梯");
-    return false;
+    // 记录 pending 状态（用于后续轮询判断超时）
+    long long start_now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              Clock::now().time_since_epoch())
+                              .count();
+    g_fas_pending_ms.store(start_now);
+    g_fas_pending_pid.store((int)pid);
+
+    // 后续由主循环轮询 fas_running() 判断节点是否就绪
+    log_line(LogLevel::Info, "fas-rs 启动中（pid " + std::to_string((int)pid) + "，等待节点就绪）");
+    return true;  // pending
 }
 
 void fas_stop() {

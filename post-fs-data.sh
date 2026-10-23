@@ -12,11 +12,14 @@ mkdir -p "$XDD_HOME/log" "$XDD_HOME/state" "$XDD_HOME/baseline" "$XDD_HOME/tmp" 
 chmod 0700 "$XDD_HOME" 2>/dev/null
 
 # 权限开机自愈：KSU 安装后模块内文件可能全是 0644（v1.0.1 真机实测，
-# customize.sh 的 set_perm 在这台设备没保住），把根目录 .sh、script/*.sh
-# 与守护二进制统一 chmod 0755。幂等，每次开机执行一次。
+# customize.sh 的 set_perm 在这台设备没保住），把根目录 .sh、script/*.sh、
+# 守护二进制与捆绑的 fas-rs 统一 chmod 0755。幂等，每次开机执行一次。
+# fas-rs 曾因 0644 无执行位导致 daemon 反复 fork 失败、启动超时刷屏
+# （v1.0.18 真机实测），故一并纳入自愈范围。
 XDD_BIN="$MODDIR/libs/arm64-v8a/xindiaodud"
+FAS_BIN="$MODDIR/libs/arm64-v8a/fas-rs"
 XDD_SELFHEAL=0
-for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$XDD_BIN"; do
+for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$XDD_BIN" "$FAS_BIN"; do
     if [ -f "$f" ] && [ ! -x "$f" ]; then
         chmod 0755 "$f" 2>/dev/null && XDD_SELFHEAL=1
     fi

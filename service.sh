@@ -81,9 +81,12 @@ sleep 5
 
 # 权限自愈（post-fs-data 已做过一次；service 阶段再确保，
 # 覆盖「安装器在 customize 之后又改权限」等时序问题）。
-# 范围：根目录 .sh、script/*.sh、守护二进制
+# 范围：根目录 .sh、script/*.sh、守护二进制、捆绑的 fas-rs。
+# fas-rs 执行位缺失会导致 daemon 反复 fork 失败、启动超时刷屏
+# （v1.0.18 真机实测），故一并纳入自愈。
 XDD_SELFHEAL=0
-for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$BIN"; do
+FAS_BIN="$MODDIR/libs/arm64-v8a/fas-rs"
+for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$BIN" "$FAS_BIN"; do
     if [ -f "$f" ] && [ ! -x "$f" ]; then
         chmod 0755 "$f" 2>/dev/null && XDD_SELFHEAL=1
     fi

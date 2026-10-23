@@ -32,9 +32,14 @@ bool fas_enabled_for(const std::string& pkg);
 int fas_generate_toml();
 
 // 进程管理 ----------------------------------------------------
-// 启动 fas-rs（nohup run <toml>）。已在跑返回 true；
-// 二进制缺失或启动超时（如内核不支持 eBPF）返回 false（调用方回退内置阶梯）。
+// 启动 fas-rs（异步非阻塞，v1.0.18）。已在跑返回 true；二进制缺失返回 false。
+// fork 后立即返回，节点就绪由 fas_poll() 在主循环轮询确认。
+// 失败节流：连续失败达阈值后本会话不再自动启动；两次尝试间隔至少 5 分钟。
 bool fas_start();
+// 轮询 pending 启动状态（主循环周期调用）：
+//   节点就绪返回 true；无 pending 或仍在等待返回 false；
+//   超时（5 秒节点未出现）则清理进程、累计失败计数并返回 false。
+bool fas_poll();
 // 停止 fas-rs 并把频率节点还原到接管前的基线值
 void fas_stop();
 // fas-rs 是否在运行（/dev/fas_rs/mode 节点存在——它由 fas-rs 运行时创建）

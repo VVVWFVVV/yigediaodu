@@ -5,6 +5,8 @@
 #include <cstring>
 #include <dirent.h>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdlib.h>
 #include <unistd.h>
@@ -541,6 +543,9 @@ bool bind_threads(const std::string& pkg,
         return false;
     }
 
+    // 去重集合：(tid, comm) 只绑一次，避免同一线程重复 setaffinity 导致回读不一致刷屏（v1.0.18）
+    std::set<std::pair<int,std::string>> bound_set;
+    
     int bound = 0;
     for (int pid : pids) {
         // opendir 用已前缀化路径；nd_read/nd_write 内部会再拼前缀，必须传逻辑路径
@@ -561,6 +566,11 @@ bool bind_threads(const std::string& pkg,
 
             for (const auto& rule : rules) {
                 if (comm.rfind(rule.first, 0) != 0) continue;  // 前缀匹配
+                
+                // v1.0.18 去重检查：同一线程只绑一次
+                auto key = std::make_pair(tid, comm);
+                if (bound_set.count(key)) break;  // 已绑过，跳过后续规则
+                
                 cpu_set_t want = parse_cpu_list(rule.second);
 
                 int rc = ::sched_setaffinity(tid, sizeof(want), &want);
@@ -580,6 +590,7 @@ bool bind_threads(const std::string& pkg,
                     }
                     if (verified) {
                         ++bound;
+                        bound_set.insert(key);
                         log_line(LogLevel::Info, "绑核成功: " + comm + " -> " + rule.second);
                     } else {
                         log_line(LogLevel::Warn, "绑核回读不一致: " + comm + " 期望 " + rule.second);
@@ -603,6 +614,7 @@ bool bind_threads(const std::string& pkg,
                     }
                     if (ok_sim) {
                         ++bound;
+                        bound_set.insert(key);
                         log_line(LogLevel::Info, "绑核（模拟）: " + comm + " -> " + rule.second);
                     }
                 } else {

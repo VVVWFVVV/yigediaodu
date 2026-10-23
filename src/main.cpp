@@ -48,7 +48,7 @@ void on_signal(int) {
 // 二进制自报版本：必须与 module.prop 的 version= 一致。
 // tools/build.ps1 在每次构建前会自动从 module.prop 同步此行（防漂移）；
 // 若手动编译忘记同步，run_tests.sh 的版本一致性断言会抓到。
-const char* kVersion = "1.0.17";
+const char* kVersion = "1.0.18";
 
 void usage() {
     std::fprintf(stderr,
@@ -491,6 +491,9 @@ int cmd_daemon() {
                               .count());
         long long now = now_ms();
 
+        // ---- v1.0.18 fas-poll：检查 pending 启动是否就绪/超时 ----
+        xdd::fas_poll();
+
         // ---- 暂停 / 全局关闭：还原后待命 ----
         bool paused = (::access(pause_flag.c_str(), F_OK) == 0);
         if (paused || !s.enabled) {
@@ -546,16 +549,16 @@ int cmd_daemon() {
             }
         }
 
-        // ---- v1.0.17 fas-rs 托管：当前应用是否把频率维度交给帧感知调度 ----
+        // ---- v1.0.18 fas-rs 托管：当前应用是否把频率维度交给帧感知调度 ----
         // 条件三合一：perapp fas.enable=1 + 二进制在 + fas-rs 在跑。
-        // 配置启用但 fas-rs 没跑（崩溃/启动失败）：尝试拉起；拉起失败
-        // （如内核不支持 eBPF）自动回落我们的阶梯与频率下限。
+        // 配置启用但 fas-rs 没跑（崩溃/启动失败）：尝试拉起（异步非阻塞）；
+        // 拉起失败自动回落我们的阶梯与频率下限。节流与超时由 fas_start/fas_poll 内部处理。
         bool fas_managed = false;
         if (has_perapp && xdd::fas_enabled_for(fg.pkg)) {
             if (xdd::fas_running()) {
                 fas_managed = true;
             } else if (xdd::fas_binary_exists()) {
-                xdd::fas_start();  // 崩溃自愈（最多阻塞 3 秒）
+                xdd::fas_start();  // 异步：fork 后立即返回，节点就绪由 fas_poll 确认
                 fas_managed = xdd::fas_running();
             }
         }
