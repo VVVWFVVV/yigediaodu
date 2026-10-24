@@ -191,12 +191,17 @@ say "fas 帧感知调度集成（v1.0.17）"
 #      → 频率下限正常落地 + live FAS=0
 #      （证明让位条件是「应用托管」而非「fas-rs 进程在跑」）
 # 另验证 games.toml 配置桥：daemon 启动时扫描 perapp 自动生成。
+# v1.0.19 追加：同时双写 fas-rs 的 USER_CONFIG（/sdcard/Android/fas-rs/games.toml）——
+# 该文件缺失/非法会导致 fas-rs 启动即 panic，且它是 fas-rs 的权威配置。
 
 # ---- A：fas 托管（sgame fas.enable=1）----
 bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
 rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"*
 mkdir -p "$XD_ROOT/dev/fas_rs"
 echo balance > "$XD_ROOT/dev/fas_rs/mode"     # 模拟 fas-rs 运行中的模式节点
+# 预置一份「脏」USER_CONFIG（v1.0.19）：验证 daemon 启动时把它覆盖为合法配置
+mkdir -p "$XD_ROOT/sdcard/Android/fas-rs"
+echo "# 脏内容：缺全部必填 section，fas-rs 读到会 panic" > "$XD_ROOT/sdcard/Android/fas-rs/games.toml"
 "$BIN" --daemon >/dev/null 2>&1 &
 DPIDF=$!
 sleep 6
@@ -208,6 +213,19 @@ chk "games.toml 含方舟（60fps）" sh -c "grep -q 'com.hypergryph.arknights.*
 chk "games.toml 含穿越火线" sh -c "grep -q 'com.tencent.tmgp.cf' '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
 chk "games.toml 不含 PUBG（fas 关）" sh -c "! grep -q pubgmhd '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
 chk "games.toml 不含哔哩哔哩（非游戏）" sh -c "! grep -q bili '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
+
+# ---- v1.0.19：fas-rs USER_CONFIG 双写断言 ----
+# 背景：fas-rs Config::new 第一步硬编码读 /sdcard/Android/fas-rs/games.toml，
+# 缺失/非法即 panic（main.rs:66 unwrap）——真机 fas.log 已实证。
+# 该文件同时是 fas-rs 的权威配置（ConfigThread 整体替换 live config），
+# 必须是完整合法内容（config/game_list/四档 margin），不能是空壳。
+chk "USER_CONFIG 已生成（sdcard 路径）" sh -c "[ -s '$XD_ROOT/sdcard/Android/fas-rs/games.toml' ]"
+chk "USER_CONFIG 覆盖预置脏内容" sh -c "! grep -q '脏内容' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
+chk "USER_CONFIG 含托管游戏（穿越火线）" sh -c "grep -q 'com.tencent.tmgp.cf.*30, 60, 90, 120' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
+chk "USER_CONFIG 含 config 节（scene_game_list=false）" sh -c "grep -q 'scene_game_list = false' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
+chk "USER_CONFIG 含四档 margin（balance=3）" sh -c "grep -A1 '\[balance\]' '$XD_ROOT/sdcard/Android/fas-rs/games.toml' | grep -q 'margin = 3'"
+chk "USER_CONFIG 与内部 games.toml 内容一致" sh -c "diff -q '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
+
 kill -TERM "$DPIDF" 2>/dev/null
 sleep 2
 chk "fas 托管 daemon 退出清理" sh -c "[ ! -d /proc/$DPIDF ]"

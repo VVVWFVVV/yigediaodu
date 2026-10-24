@@ -28,7 +28,10 @@ std::string fas_toml_path();
 bool fas_enabled_for(const std::string& pkg);
 
 // 生成 games.toml：扫描 config/perapp/*.conf 中 fas.enable=1 的应用。
-// 返回纳入管理的应用数；内容与现有文件相同返回 -1（无需重启 fas-rs）。
+// 内容同时双写：内部运行时目录（原子写）+ fas-rs 的 USER_CONFIG
+// /sdcard/Android/fas-rs/games.toml（就地写保留 inode，供其 inotify 热加载）——
+// 该文件是 fas-rs 的权威配置且启动时必读，缺失会导致它 panic（v1.0.19）。
+// 返回纳入管理的应用数；两处内容都已相同返回 -1（无需重启 fas-rs）。
 int fas_generate_toml();
 
 // 进程管理 ----------------------------------------------------

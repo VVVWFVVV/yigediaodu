@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -68,6 +69,17 @@ const char* kPidPath = "/data/adb/WY925976742/state/fas.pid";
 const char* kLogPath = "/data/adb/WY925976742/log/fas.log";
 const char* kCfgDir = "/data/adb/WY925976742/config";
 
+// fas-rs 硬编码的用户配置（v1.0.19）：main.rs:50 `const USER_CONFIG`。
+// Config::new 第一步即 fs::read_to_string(USER_CONFIG)?——文件缺失或 TOML 非法
+// 都会让 run() 返回 Err，在 main.rs:66 被 unwrap 触发 panic（真机日志特征：
+// panic location main.rs:66 + reason Unknown，且没有 "Config watcher started"）。
+// 该文件同时是 fas-rs 的权威配置（ConfigThread 持续读取并整体替换 live config），
+// 必须写完整合法内容而非空壳。写入用就地写（保留 inode）：fas-rs 以 inotify
+// 监视该路径，原子 rename 会换 inode 导致其热加载失效。
+const char* kUserTomlPath = "/sdcard/Android/fas-rs/games.toml";
+// /sdcard 为 FUSE，早期/异常时可能不可写；/data/media/0 是同一存储的真实路径，作回退
+const char* kUserTomlFallbackPath = "/data/media/0/Android/fas-rs/games.toml";
+
 bool truthy_val(const std::string& v) {
     return v == "1" || v == "true" || v == "True" || v == "TRUE" || v == "yes" || v == "on";
 }
@@ -124,6 +136,59 @@ void cleanup_orphan_fas() {
         ::unlink(nd_path(kPidPath).c_str());
         log_line(LogLevel::Info, "fas-rs 孤儿进程清理：pid " + std::to_string(pid) + " 已消失");
     }
+}
+
+// 递归创建逻辑路径的父目录（逐级 mkdir，EEXIST 忽略；host 模式经 nd_path 落 mock 树）
+bool mkdirs_for(const std::string& logic_path) {
+    std::string real = nd_path(logic_path);
+    size_t pos = real.find_last_of('/');
+    if (pos == std::string::npos || pos == 0) return true;  // 根目录无需创建
+    std::string dir = real.substr(0, pos);
+    // 逐级创建（从根开始，天然支持多级缺失）
+    std::string cur;
+    size_t i = 0;
+    while (i < dir.size()) {
+        size_t next = dir.find('/', i + 1);
+        if (next == std::string::npos) next = dir.size();
+        cur = dir.substr(0, next);
+        if (!cur.empty() && cur != "/") {
+            if (::mkdir(cur.c_str(), 0755) != 0 && errno != EEXIST) return false;
+        }
+        i = next;
+    }
+    return true;
+}
+
+// 就地写（fopen "w" 截断 + 写 + fflush + fsync）：保留 inode，供 fas-rs 的
+// inotify 监视收到 CLOSE_WRITE 事件做热加载。内部 toml 无监视者，仍用原子 rename。
+bool write_in_place(const std::string& logic_path, const std::string& content) {
+    if (!mkdirs_for(logic_path)) return false;
+    FILE* f = std::fopen(nd_path(logic_path).c_str(), "w");
+    if (!f) return false;
+    bool ok = std::fputs(content.c_str(), f) != EOF;
+    if (ok && std::fflush(f) != 0) ok = false;
+    if (ok) {
+        int fd = ::fileno(f);
+        if (fd >= 0) ::fsync(fd);  // 断电安全：中途掉电也不会留下写了一半的配置
+    }
+    std::fclose(f);
+    return ok;
+}
+
+// 把生成的 games.toml 内容写到 fas-rs 的 USER_CONFIG：
+//   1) 优先 /sdcard/Android/fas-rs/games.toml（fas-rs 实际读取路径）
+//   2) /sdcard 写失败（FUSE 未就绪等）回退 /data/media/0/同路径（同一存储真实路径）
+// 返回实际写入成功的逻辑路径；都失败返回空串。
+// 注意：写入成功路径必须与 fas-rs 读取路径一致——/sdcard 与 /data/media/0
+// 在设备上指向同一文件，哪个能写就用哪个，无需两个都写。
+std::string fas_write_user_toml(const std::string& content) {
+    if (write_in_place(kUserTomlPath, content)) return kUserTomlPath;
+    if (write_in_place(kUserTomlFallbackPath, content)) {
+        log_line(LogLevel::Warn,
+                 "sdcard 不可写，fas-rs 配置已回退写入 /data/media/0（功能不受影响）");
+        return kUserTomlFallbackPath;
+    }
+    return "";
 }
 
 }  // namespace
@@ -192,8 +257,9 @@ int fas_generate_toml() {
 
     // 生成 TOML 内容
     std::ostringstream toml;
-    toml << "# 由一个调度自动生成（v1.0.17），请勿手改\n"
+    toml << "# 由一个调度自动生成（v1.0.19），请勿手改\n"
          << "# 改法：编辑 config/perapp/<包名>.conf 的 fas.enable / fas.target_fps\n"
+         << "# 本文件由守护进程同步写入 fas-rs 的用户配置 /sdcard/Android/fas-rs/games.toml\n"
          << "\n"
          << "[config]\n"
          << "keep_std = true\n"
@@ -218,9 +284,13 @@ int fas_generate_toml() {
          << "margin = 1\n";
     std::string content = toml.str();
 
-    // 与现有文件相同则跳过（返回 -1，调用方无需重启 fas-rs）
-    std::string existing;
-    if (nd_read(fas_toml_path(), existing) && existing == content) return -1;
+    // 与现有文件相同则跳过（返回 -1，调用方无需重启 fas-rs）。
+    // v1.0.19：去重扩展为「内部 toml 与 USER_CONFIG 都一致」——任一不符都要重写，
+    // 否则 fas-rs 读到的仍是旧配置（USER_CONFIG 是它的权威配置）。
+    std::string ex_internal, ex_user;
+    bool same = nd_read(fas_toml_path(), ex_internal) && ex_internal == content &&
+                nd_read(kUserTomlPath, ex_user) && ex_user == content;
+    if (same) return -1;
 
     // 确保运行时 config 目录存在（首次运行/升级时可能没有）
     ::mkdir(nd_path(kCfgDir).c_str(), 0755);  // 已存在则 EEXIST，忽略
@@ -235,6 +305,15 @@ int fas_generate_toml() {
     std::fputs(content.c_str(), f);
     std::fclose(f);
     ::rename(nd_path(tmp).c_str(), nd_path(fas_toml_path()).c_str());
+
+    // v1.0.19：同步写 fas-rs 的 USER_CONFIG（就地写，保留 inode 供其 inotify 热加载）。
+    // 该文件缺失时 fas-rs 启动即 panic（main.rs:66 unwrap），是必须同步的输出面。
+    // 写失败不阻断 daemon：fas_start() 启动前会校验存在性，缺失则放弃启动并记失败。
+    if (fas_write_user_toml(content).empty()) {
+        log_line(LogLevel::Warn,
+                 "fas-rs 用户配置写入失败（sdcard 与 /data/media/0 均不可写），"
+                 "本次跳过 fas-rs 启动");
+    }
     return (int)games.size();
 }
 
@@ -321,6 +400,14 @@ bool fas_start() {
     fas_generate_toml();
     if (!nd_exists(fas_toml_path())) {
         log_line(LogLevel::Warn, "fas games.toml 不存在，跳过 fas-rs 启动");
+        write_fas_retry_count(failures + 1);
+        return false;
+    }
+    // 6b) v1.0.19：校验 fas-rs 的 USER_CONFIG 存在性。该文件缺失时 fas-rs 启动即
+    // panic（main.rs:66 unwrap），等 5 秒超时才发现为时已晚——这里即时放弃并记失败。
+    if (!nd_exists(kUserTomlPath)) {
+        log_line(LogLevel::Warn,
+                 "fas-rs 用户配置不存在（/sdcard/Android/fas-rs/games.toml），跳过启动");
         write_fas_retry_count(failures + 1);
         return false;
     }

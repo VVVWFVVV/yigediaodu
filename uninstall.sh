@@ -48,6 +48,8 @@ if [ -f "$XDD_STATE/fas.pid" ]; then
     [ -n "$FPID" ] && kill -9 "$FPID" 2>/dev/null
 fi
 killall fas-rs 2>/dev/null
+# 清理 fas-rs 用户配置（v1.0.19：daemon 双写到 /sdcard/Android/fas-rs/games.toml）
+rm -rf /sdcard/Android/fas-rs /data/media/0/Android/fas-rs 2>/dev/null
 
 rm -rf "$XDD_HOME" 2>/dev/null
 echo " 一个调度：运行时目录已清理，卸载完成"
