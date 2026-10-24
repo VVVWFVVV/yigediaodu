@@ -48,7 +48,7 @@ void on_signal(int) {
 // 二进制自报版本：必须与 module.prop 的 version= 一致。
 // tools/build.ps1 在每次构建前会自动从 module.prop 同步此行（防漂移）；
 // 若手动编译忘记同步，run_tests.sh 的版本一致性断言会抓到。
-const char* kVersion = "1.0.19";
+const char* kVersion = "1.0.20";
 
 void usage() {
     std::fprintf(stderr,
@@ -318,10 +318,12 @@ std::string trim_copy(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
-// 落 stopping 标记：让监督者把「按请求退出/互斥退让」识别为正常退出，
-// 不计崩溃（监督者的崩溃判定看的是这个标记，不是退出码）
-void touch_stopping() {
-    FILE* f = std::fopen(xdd::nd_path("/data/adb/WY925976742/state/stopping").c_str(), "w");
+// 落 lock_yield 标记：互斥退让（另一个 daemon 持锁）时写（v1.0.20）。
+// 曾经的坑：冲突退出误用 stopping（"按请求停止"语义），监督者把它当
+// 请求停止——重置崩溃计数 + 1 秒重拉，形成无限循环且崩溃自禁被绕过
+// （v1.0.19 真机刷屏 600+ 条/11 分钟）。现拆出独立标记，语义精确化。
+void touch_lock_yield() {
+    FILE* f = std::fopen(xdd::nd_path("/data/adb/WY925976742/state/lock_yield").c_str(), "w");
     if (f) std::fclose(f);
 }
 
@@ -383,7 +385,7 @@ int cmd_daemon() {
     }
     if (::flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
         xdd::log_line(xdd::LogLevel::Warn, "另一个守护实例持有 daemon.lock，本次退出");
-        touch_stopping();  // 互斥退让：监督者不计崩溃
+        touch_lock_yield();  // 互斥退让：监督者转入退避观察，不计崩溃
         return 0;
     }
     // fd 不关闭：持锁直到进程退出（内核自动释放）
@@ -407,7 +409,7 @@ int cmd_daemon() {
                     if (cmdline.find("xindiaodud") != std::string::npos) {
                         xdd::log_line(xdd::LogLevel::Warn,
                                       "daemon.pid 指向的进程仍在运行 (pid " + pid_s + ")，本次退出");
-                        touch_stopping();  // 互斥退让：监督者不计崩溃
+                        touch_lock_yield();  // 互斥退让：监督者转入退避观察，不计崩溃
                         return 0;
                     }
                 }
@@ -420,6 +422,11 @@ int cmd_daemon() {
     g_last_tick.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now().time_since_epoch())
                           .count());
+
+    // 3b) 重置 fas-rs 失败计数（v1.0.20）：兑现日志承诺「下次重启 daemon 重置」。
+    // 曾经的坑：计数器只增不减、跨重启 persisted，3 次失败后即使根因已修复
+    // （如 v1.0.19 补写 USER_CONFIG）fas-rs 也永不再自动启动。
+    xdd::fas_reset_retry_count();
 
     // ---- 启动自检：配置与节点不可用时不进入主循环，留可读原因 ----
     {

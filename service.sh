@@ -26,26 +26,45 @@ crash_disable() {
         > "$XDD_STATE/disabled_crash.reason" 2>/dev/null
     xdd_log "连续崩溃 ${CRASH} 次，已自动禁用（原因见 state/disabled_crash.reason）"
     rm -f "$XDD_HOME/daemon.pid" 2>/dev/null
-    rm -rf "$SUP_LOCK" 2>/dev/null
+    # 不删 supervisor.lock：flock 随进程退出自动释放，删文件会换 inode
 }
 
-# ---------------- 单实例保护（mkdir 原子锁） ----------------
-# 真机教训（v1.0.5 六测）：pid 文件单实例有时序漏洞——KSU 可能短跑两次
-# service.sh，两个实例同时读到空/旧 pid 文件都启动，各自的 daemon 互踩
-# 锁与 enforce，开机日志爆刷。mkdir 是原子操作，只有一个实例能建成，
-# 从根上杜绝双监督者。
+# ---------------- 单实例保护（flock 原子锁） ----------------
+# 演进史：pid 文件单实例（v1.0.5 前）→ mkdir+pid 目录锁（v1.0.6）→ flock（v1.0.20）。
+# mkdir+pid 的真机教训（v1.0.19 测）：刷模块后双 supervisor 并存、失败方每秒
+# 重拉 daemon 刷屏 600+ 条/11 分钟。根因是目录锁的两处硬伤：
+#   ① mkdir 成功到写 pid 文件之间有 TOCTOU 窗口，第二个实例读到空 pid
+#      会删锁重建，两个实例都越过互斥；
+#   ② 陈旧锁回收只认 pid 活性，认不出本模块在跑的监督者。
+# flock 是内核级原子锁：第二个实例拿不到锁立即退出；且退出点在大清底
+# **之前**，根本不会执行 cleanup 杀别人的 daemon。
+# 锁文件永不删除：删除会换 inode，新旧实例锁不同 inode 会同时"持锁"
+# （daemon.lock 的注释记载过同类教训，pid 文件互斥就是这么来的）。
 SUP_LOCK="$XDD_HOME/supervisor.lock"
-if ! mkdir "$SUP_LOCK" 2>/dev/null; then
+
+# 兼容旧版目录锁（v1.0.19 及之前）：目录存在且持有者是本模块活监督者 → 退出，
+# 不制造第三个 supervisor。覆盖"老监督者活着但其 pid 文件陈旧"的升级窗口。
+if [ -d "$SUP_LOCK" ]; then
     OLD=$(cat "$SUP_LOCK/pid" 2>/dev/null)
-    if [ -n "$OLD" ] && [ -d "/proc/$OLD" ]; then
+    if [ -n "$OLD" ] && [ -d "/proc/$OLD" ] && \
+       grep -aq "service\.sh" "/proc/$OLD/cmdline" 2>/dev/null; then
         xdd_log "监督者已在运行 (pid $OLD)，本次启动退出"
         exit 0
     fi
-    # 持有者已死（上次被杀未清理）：清掉陈旧锁再竞争
     rm -rf "$SUP_LOCK" 2>/dev/null
-    mkdir "$SUP_LOCK" 2>/dev/null || exit 0
 fi
-echo $$ > "$SUP_LOCK/pid"
+
+# flock 缺失时安全失败（没有监督者好过双监督者互踩）
+if ! command -v flock >/dev/null 2>&1; then
+    xdd_log "flock 不可用，无法保证单实例，监督者退出"
+    exit 0
+fi
+exec 9>"$SUP_LOCK"
+if ! flock -n 9; then
+    xdd_log "另一个监督者持有 supervisor.lock，本次启动退出"
+    exit 0
+fi
+echo $$ > "$XDD_HOME/supervisor.pid"   # 仅诊断展示，不参与互斥
 
 DAEMON_PID=""
 STOP=0
@@ -64,7 +83,7 @@ shutdown() {
     # 退出前按基线还原节点，不留残余
     [ -x "$BIN" ] && "$BIN" --restore >/dev/null 2>&1
     rm -f "$XDD_HOME/daemon.pid" 2>/dev/null
-    rm -rf "$SUP_LOCK" 2>/dev/null
+    # 不删 supervisor.lock：flock 随进程退出自动释放（v1.0.20）
     xdd_log "监督者退出，内核节点已还原"
     exit 0
 }
@@ -117,13 +136,16 @@ for p in /proc/[0-9]*; do
     # xindiaodud（守护二进制名，v1.0.16 起模块 id 改为 WY925976742
     # 但二进制名保留）、fas-rs（v1.0.17 捆绑的帧感知调度——监督者重启时
     # 杀掉孤儿，让 daemon 用最新 games.toml 重新拉起）、
-    # xindiaodu+service.sh（v1.0.16 之前的旧 id 监督者——若用户没按
-    # 提示先卸载旧版，这里兜底接管，防止两个调度互相杀）。
+    # 以及旧版/本版监督者（cmdline 同时含模块 id 与 service.sh）：
+    # v1.0.19 真机教训——旧匹配只认 v1.0.16 之前的老 id "xindiaodu"，
+    # 现行 id "WY925976742" 的老监督者永不被清理，与新监督者并存刷屏。
     # 不能宽匹配 service.sh——其它模块的常驻 service.sh 会被误杀！
     # （NUL 分隔，grep -a 处理）
     if grep -aq "xindiaodud" "$p/cmdline" 2>/dev/null || \
        grep -aq "fas-rs" "$p/cmdline" 2>/dev/null || \
        { grep -aq "xindiaodu" "$p/cmdline" 2>/dev/null && \
+         grep -aq "service\.sh" "$p/cmdline" 2>/dev/null; } || \
+       { grep -aq "WY925976742" "$p/cmdline" 2>/dev/null && \
          grep -aq "service\.sh" "$p/cmdline" 2>/dev/null; }; then
         kill -TERM "$pid" 2>/dev/null
         KILLED="$KILLED $pid"
@@ -170,6 +192,8 @@ while [ "$STOP" = "0" ]; do
     CRASH=0
     BACKOFF=1
     STALE=0
+    CONFLICTS=0   # v1.0.20：连续锁冲突退让次数（另一个 daemon 持锁）
+    LAST_WAIT=0   # v1.0.20：上一次退避秒数（仅台阶变化时打日志）
     xdd_log "守护进程启动 pid=$DAEMON_PID"
 
     # 内层循环：看护当前这一代守护进程
@@ -187,9 +211,10 @@ while [ "$STOP" = "0" ]; do
             break
         fi
 
-        # 进程已退出：先区分「按请求停止」与「崩溃」
+        # 进程已退出：三分支——「按请求停止」「锁冲突退让」「崩溃」
         # （fcctl daemon stop / 卸载 / 禁用都会先落 stopping 标记，
-        #  不计崩溃——否则手动停 3 次会误触自动禁用）
+        #  不计崩溃——否则手动停 3 次会误触自动禁用；
+        #  lock_yield 是 daemon 互斥退让标记，v1.0.20 从 stopping 拆出）
         if [ ! -d "/proc/$DAEMON_PID" ]; then
             # 回收僵尸：后台子进程退出后不 wait 会留 zombie，
             # /proc/<pid> 仍在会让 diag 误报「运行中」（v1.0.5 真机）
@@ -202,6 +227,28 @@ while [ "$STOP" = "0" ]; do
                 sleep 1   # 退避：防止互斥退让时 tight loop 刷屏
                 break
             fi
+            if [ -f "$XDD_STATE/lock_yield" ]; then
+                # v1.0.20：互斥退让（另一个 daemon 持锁）独立处理。
+                # 曾经的坑：daemon 冲突退出也写 stopping，被按请求停止路径
+                # 重置 CRASH + 1 秒重拉，形成无限循环且崩溃自禁被绕过
+                # （v1.0.19 真机刷屏 600+ 条/11 分钟）。
+                # 现：指数退避（1s→30s 上限）+ 仅状态变更打日志；
+                # 不退出——赢家 daemon 死后 30s 内本监督者自动接管。
+                rm -f "$XDD_STATE/lock_yield"
+                CONFLICTS=$((CONFLICTS + 1))
+                SHIFT=$CONFLICTS
+                [ "$SHIFT" -gt 5 ] && SHIFT=5
+                WAIT=$((1 << SHIFT))
+                [ "$WAIT" -gt 30 ] && WAIT=30
+                if [ "$CONFLICTS" = "1" ]; then
+                    xdd_log "daemon 互斥退让（另一 daemon 持锁），转入 ${WAIT}s 退避观察"
+                elif [ "$WAIT" != "$LAST_WAIT" ]; then
+                    xdd_log "锁冲突持续（第 $CONFLICTS 次），退避延长至 ${WAIT}s"
+                fi
+                LAST_WAIT=$WAIT
+                sleep "$WAIT"
+                break
+            fi
             CRASH=$((CRASH + 1))
             xdd_log "守护进程退出（本轮第 $CRASH 次），${BACKOFF}s 后重启"
             if [ "$CRASH" -ge 3 ]; then
@@ -212,6 +259,13 @@ while [ "$STOP" = "0" ]; do
             BACKOFF=$((BACKOFF * 2))
             [ "$BACKOFF" -gt 30 ] && BACKOFF=30
             break
+        fi
+
+        # 守护存活：解除此前的锁冲突退让状态（v1.0.20）
+        if [ "$CONFLICTS" -gt 0 ]; then
+            xdd_log "锁冲突解除，恢复看护（pid $DAEMON_PID）"
+            CONFLICTS=0
+            LAST_WAIT=0
         fi
 
         # 心跳判活：算真实年龄。守护循环含 dumpsys（最长 3s）与空闲退避

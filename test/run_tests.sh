@@ -297,6 +297,49 @@ kill -TERM "$DPID6" 2>/dev/null
 sleep 1
 chk "清理陈旧 pid 测试进程" sh -c "[ ! -d /proc/$DPID6 ] || true"
 
+# ---- v1.0.20：互斥退让标记 lock_yield（防 supervisor 无限重拉刷屏）----
+# 背景：daemon 锁冲突退出曾写 stopping 标记，监督者误判「按请求停止」→
+# 重置崩溃计数 + 1 秒重拉 → 无限循环，且 3 次崩溃自禁的安全网被绕过
+# （v1.0.19 真机刷屏 600+ 条/11 分钟）。现冲突退出写独立的 lock_yield，
+# 且绝不碰 stopping。
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"*
+rm -f "$XD_ROOT/data/adb/WY925976742/state/lock_yield" \
+      "$XD_ROOT/data/adb/WY925976742/state/stopping"
+"$BIN" --daemon >/dev/null 2>&1 &
+DPID7=$!
+sleep 2
+"$BIN" --daemon >/dev/null 2>&1 &
+DPID8=$!
+sleep 2
+chk "锁冲突实例退出（退出码 0）" sh -c "[ ! -d /proc/$DPID8 ]"
+chk "锁冲突退出写 lock_yield 标记" sh -c "[ -f '$XD_ROOT/data/adb/WY925976742/state/lock_yield' ]"
+chk "锁冲突退出不写 stopping（防无限重拉回归）" sh -c "[ ! -f '$XD_ROOT/data/adb/WY925976742/state/stopping' ]"
+chk "daemon 日志含互斥退让原因" sh -c "grep -q '另一个守护实例持有 daemon.lock' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+kill -TERM "$DPID7" 2>/dev/null
+sleep 1
+rm -f "$XD_ROOT/data/adb/WY925976742/state/lock_yield"
+
+# ---- v1.0.20：锁释放后可重入（赢家退出后新实例能接管）----
+"$BIN" --daemon >/dev/null 2>&1 &
+DPID9=$!
+sleep 2
+chk "锁释放后新实例可正常持锁运行" sh -c "[ -d /proc/$DPID9 ]"
+kill -TERM "$DPID9" 2>/dev/null
+sleep 1
+
+# ---- v1.0.20：fas.retry_count 启动重置 ----
+# 曾经的坑：计数器只增不减、跨重启 persisted，3 次失败后即使根因已修复
+# （如 v1.0.19 补写 USER_CONFIG）fas-rs 也永不再自动启动——日志却一直
+# 承诺「下次重启 daemon 重置」。现在 daemon 持锁后立即重置。
+echo 3 > "$XD_ROOT/data/adb/WY925976742/state/fas.retry_count"
+"$BIN" --daemon >/dev/null 2>&1 &
+DPID10=$!
+sleep 2
+chk "daemon 启动重置 fas.retry_count 为 0" sh -c "grep -q '^0$' '$XD_ROOT/data/adb/WY925976742/state/fas.retry_count'"
+kill -TERM "$DPID10" 2>/dev/null
+sleep 1
+
 say "fcctl 控制入口（JSON 信封 + 看门狗）"
 FC="$REPO/script/fcctl.sh"
 export XDD_HOME="$XD_ROOT/data/adb/WY925976742"

@@ -34,6 +34,11 @@ bool fas_enabled_for(const std::string& pkg);
 // 返回纳入管理的应用数；两处内容都已相同返回 -1（无需重启 fas-rs）。
 int fas_generate_toml();
 
+// 重置 fas-rs 失败计数为 0（v1.0.20）。
+// 计数器跨重启 persisted 曾导致 3 次失败后 fas-rs 永不再启动（根因修复后
+// 也被挡），调用点：daemon 启动与 fas_poll 节点就绪。
+void fas_reset_retry_count();
+
 // 进程管理 ----------------------------------------------------
 // 启动 fas-rs（异步非阻塞，v1.0.18）。已在跑返回 true；二进制缺失返回 false。
 // fork 后立即返回，节点就绪由 fas_poll() 在主循环轮询确认。

@@ -213,6 +213,13 @@ bool fas_binary_exists() {
 
 std::string fas_toml_path() { return kTomlPath; }
 
+// 重置 fas-rs 失败计数为 0（v1.0.20）。
+// 修复：计数器曾只增不减、跨 daemon 重启 persisted——3 次失败后即使根因
+// 已修复（如 v1.0.19 补写 USER_CONFIG）fas-rs 也永不再自动启动，而日志
+// 一直承诺「下次重启 daemon 重置」。调用点：daemon 启动（cmd_daemon 持锁后）
+// 与 fas_poll 节点就绪（成功后清零，崩溃后可重新获得完整重试额度）。
+void fas_reset_retry_count() { write_fas_retry_count(0); }
+
 bool fas_enabled_for(const std::string& pkg) {
     if (pkg.empty()) return false;
     Profile pa;
@@ -328,6 +335,8 @@ bool fas_poll() {
         if (g_fas_pending_ms.load() > 0) {
             g_fas_pending_ms.store(0);
             g_fas_pending_pid.store(0);
+            // v1.0.20：成功就绪即清零失败计数——崩溃重启后可重新获得完整重试额度
+            write_fas_retry_count(0);
             log_line(LogLevel::Info, "fas-rs 节点就绪，接管完成");
         }
         return true;
