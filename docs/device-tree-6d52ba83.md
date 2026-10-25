@@ -177,6 +177,8 @@ fas-rs 的硬编码目标（均不存在）：
 
 对本项目的意义：~~自研帧监控挂 0x170764 或 0x135af0~~——**libgui 系符号虽在，但 uprobe 注册被 EBUSY 挡（见 8.1），本表仅留证符号存在性；帧监控实际走 8.4 的 vendor adreno 路线。**
 
+**fas-rs 的确切死因（2026-10-25 真机闭环）**：启动时 eBPF 可正常加载（进程能活数分钟，最长实测 7.5 分钟），**游戏到来时 attach uprobe 解析不到旧符号 → `run()` 返回 Err → `main.rs:66` panic**（fas.log 每次尝试都是「Config watcher started → 0~7.5 分钟内 panic」）。v1.0.21 起 daemon 的 stale 清理自动收场（清节点/pid、还原基线、3 次尝试后本会话停拉），频率维度交还内置阶梯。
+
 ### 8.3 debugfs / tracefs / fas_rs 现状
 
 - debugfs：挂于 `/sys/kernel/debug`（rw），可 root 挂载
