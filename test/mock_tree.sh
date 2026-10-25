@@ -204,6 +204,9 @@ chmod +x "$BIN/dumpsys"
 # 测试控制文件与运行时目录骨架
 mkdir -p "$ROOT/state" "$ROOT/data/adb/WY925976742/log" "$ROOT/data/adb/WY925976742/state" \
          "$ROOT/data/adb/WY925976742/baseline" "$ROOT/data/adb/WY925976742/tmp"
+# /sdcard 存储（v1.0.21：daemon 启动时有界等待其就绪——mock 默认就绪；
+# 「未就绪时等待、就绪后补写」的行为由 run_tests.sh 场景 5 显式移除后验证）
+mkdir -p "$ROOT/sdcard/Android/fas-rs"
 echo "com.tencent.tmgp.sgame" > "$ROOT/state/fg"
 echo "on" > "$ROOT/state/screen"
 

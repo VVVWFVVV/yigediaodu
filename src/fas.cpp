@@ -1,5 +1,6 @@
 #include "fas.hpp"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -39,6 +40,12 @@ static std::atomic<int> g_fas_pending_pid{0};
 static const long long FAS_RETRY_COOLDOWN_MS = 5 * 60 * 1000;  // 5 分钟
 static const long long FAS_START_TIMEOUT_MS = 5000;            // 单次启动等待节点上限 5 秒
 static const int FAS_MAX_FAILURES = 3;  // 连续失败阈值（超过则停止自动重试）
+
+// v1.0.21：「已连续失败 N 次，暂停自动启动」日志的本会话一次性哨兵。
+// 修复的刷屏：fas_start() 的计数器检查曾每次调用都打日志，而该检查在
+// attempt 时间更新之前返回——冷却过期后主循环（约每秒一次）持续触发，
+// 游戏前台期间每秒一条。计数器清零（daemon 重启/节点就绪）时同步复位。
+static bool g_fas_strike_logged = false;
 
 // 读/写 fas.retry_count
 static int read_fas_retry_count() {
@@ -125,6 +132,28 @@ void write_fas_pid(int pid) {
     if (!f) return;
     std::fprintf(f, "%d\n", pid);
     std::fclose(f);
+}
+
+// v1.0.21：扫 /proc 找活着的 fas-rs 进程——无 pid 文件或 pid 失效时的领养兜底
+// （daemon 重启后 pid 文件丢失、或 pid 被复用指向别的进程的场景）。
+// 僵尸进程的 /proc/<pid>/cmdline 为空，天然不会被匹配（判活自动排除僵尸）。
+// 返回 pid，找不到返回 -1。
+int find_fas_process() {
+    DIR* d = ::opendir(nd_path("/proc").c_str());
+    if (!d) return -1;
+    struct dirent* e;
+    int found = -1;
+    while ((e = readdir(d)) != nullptr) {
+        if (!isdigit((unsigned char)e->d_name[0])) continue;
+        std::string cmd;
+        if (!nd_read(std::string("/proc/") + e->d_name + "/cmdline", cmd)) continue;
+        if (cmd.find("fas-rs") != std::string::npos) {
+            found = std::atoi(e->d_name);
+            break;
+        }
+    }
+    ::closedir(d);
+    return found;
 }
 
 // 清理孤儿进程（pid 文件存在但进程已结束）
@@ -218,7 +247,10 @@ std::string fas_toml_path() { return kTomlPath; }
 // 已修复（如 v1.0.19 补写 USER_CONFIG）fas-rs 也永不再自动启动，而日志
 // 一直承诺「下次重启 daemon 重置」。调用点：daemon 启动（cmd_daemon 持锁后）
 // 与 fas_poll 节点就绪（成功后清零，崩溃后可重新获得完整重试额度）。
-void fas_reset_retry_count() { write_fas_retry_count(0); }
+void fas_reset_retry_count() {
+    write_fas_retry_count(0);
+    g_fas_strike_logged = false;  // v1.0.21：计数器清零后允许再次提示暂停启动
+}
 
 bool fas_enabled_for(const std::string& pkg) {
     if (pkg.empty()) return false;
@@ -324,7 +356,24 @@ int fas_generate_toml() {
     return (int)games.size();
 }
 
-bool fas_running() { return nd_exists(kModeNode); }
+// v1.0.21：判活 = mode 节点在 + fas-rs 进程真活着。
+// 旧实现只查节点存在——fas-rs 崩溃后会留下残留节点，加上 daemon 从不 reap
+// 形成的僵尸进程，已死的 fas-rs 会被判成「运行中」（假接管）：主循环把频率
+// 维度让位给死人，游戏期间频率干预完全空缺（2026-10-24 真机两次复现，
+// 现场：/dev/fas_rs/mode 残留 + state/fas.pid 指着僵尸 31568）。
+// 进程判活走 read_fas_pid()（已含 cmdline 校验防 pid 复用；僵尸 cmdline 为
+// 空天然通不过）；pid 文件缺失/失效时扫 /proc 领养孤儿（daemon 重启场景）。
+bool fas_running() {
+    if (!nd_exists(kModeNode)) return false;
+    int pid = read_fas_pid();
+    if (pid > 0) return true;
+    pid = find_fas_process();
+    if (pid > 0) {
+        write_fas_pid(pid);  // 补写 pid 文件，后续判活走快路径
+        return true;
+    }
+    return false;
+}
 
 // 检查 pending 启动状态：如果节点已就绪则清 pending；如果超时则记失败、清 pid。
 // 返回 true 表示「已在运行」，false 表示「未就绪/超时」。
@@ -397,8 +446,13 @@ bool fas_start() {
     // 4) 检查失败计数阈值
     int failures = read_fas_retry_count();
     if (failures >= FAS_MAX_FAILURES) {
-        log_line(LogLevel::Info, "fas-rs 已连续失败 " + std::to_string(FAS_MAX_FAILURES) +
-                                 " 次，本会话暂停自动启动（下次重启 daemon 重置）");
+        // v1.0.21：一次性哨兵防刷屏（该检查在 attempt 时间更新前返回，
+        // 冷却过期后主循环每秒都会走到这里）
+        if (!g_fas_strike_logged) {
+            g_fas_strike_logged = true;
+            log_line(LogLevel::Info, "fas-rs 已连续失败 " + std::to_string(FAS_MAX_FAILURES) +
+                                     " 次，本会话暂停自动启动（下次重启 daemon 重置）");
+        }
         return false;
     }
 
@@ -508,6 +562,48 @@ void fas_snapshot_freq_baseline() {
 void fas_restore_freq_baseline() {
     // 从基线文件把所有 scaling_min_freq 条目写回
     baseline_restore_matching("scaling_min_freq");
+}
+
+// v1.0.21：僵尸回收 + stale 崩溃恢复（假接管根治）。主循环每次迭代、
+// fas 托管判定之前调用；daemon 启动路径也调一次（清理上次会话残留）。
+// 场景：fas-rs 启动后崩溃/被 kill——留下 /dev/fas_rs/mode 残留节点，pid
+// 文件指向已死进程（甚至僵尸）。旧逻辑下 fas_running() 误判「运行中」，
+// 频率维度被永久让位给死人。本函数：
+//   1) waitpid(WNOHANG) 回收已死的 fas-rs 子进程（防僵尸堆积；
+//      非本进程子进程时返回 -1，无副作用）
+//   2) 确认 stale（节点在、进程不在）→ 还原频率基线（fas-rs 猝死前可能
+//      已把 min_freq 调高）+ 清残留节点与 pid 文件 + 记一次失败（走既有
+//      冷却/3 次阈值）+ 打明确诊断（已知根因指向设备树档案）
+// 返回 true 表示发生了 stale 清理（频率现场已还原，调用方应重落地）。
+bool fas_reap_and_check() {
+    // 1) 回收已死子进程（僵尸的 /proc/<pid>/cmdline 为空，read_fas_pid 返回
+    //    -1，waitpid 目标改用文件里的原始 pid 更稳——这里直接按 pid 文件值收）
+    std::ifstream pf(nd_path(kPidPath));
+    int file_pid = -1;
+    if (pf.is_open()) {
+        long v = -1;
+        pf >> v;
+        if (v > 0) file_pid = (int)v;
+    }
+    if (file_pid > 0) ::waitpid((pid_t)file_pid, nullptr, WNOHANG);
+
+    // 2) 无残留节点：未接管或从未启动，正常
+    if (!nd_exists(kModeNode)) return false;
+
+    // 3) 节点在且进程活着（含孤儿领养）：正常接管中
+    if (fas_running()) return false;
+
+    // 4) stale：进程已死但节点残留——崩溃现场，清理并回退
+    log_line(LogLevel::Warn,
+             "fas-rs 已崩溃（mode 节点残留但进程不在），频率维度回退内置稳帧阶梯");
+    log_line(LogLevel::Info,
+             "诊断：fas-rs 在此设备不可用（已知根因：厂商内核 perf-uprobe+BPF 派发被"
+             "阉割；Android 17 移除 queueBuffer 旧符号），详见 docs/device-tree-6d52ba83.md");
+    fas_restore_freq_baseline();
+    ::unlink(nd_path(kPidPath).c_str());
+    ::unlink(nd_path(kModeNode).c_str());
+    write_fas_retry_count(read_fas_retry_count() + 1);
+    return true;
 }
 
 FasStatus fas_status() {

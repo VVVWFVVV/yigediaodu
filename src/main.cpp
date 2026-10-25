@@ -48,7 +48,7 @@ void on_signal(int) {
 // 二进制自报版本：必须与 module.prop 的 version= 一致。
 // tools/build.ps1 在每次构建前会自动从 module.prop 同步此行（防漂移）；
 // 若手动编译忘记同步，run_tests.sh 的版本一致性断言会抓到。
-const char* kVersion = "1.0.20";
+const char* kVersion = "1.0.21";
 
 void usage() {
     std::fprintf(stderr,
@@ -448,6 +448,20 @@ int cmd_daemon() {
     // v1.0.17：fas games.toml 生成（配置桥，始终生成——无二进制时也可供检查）；
     // 二进制存在才启动 fas-rs；内核 eBPF 不支持时启动超时失败，
     // 静默回退内置稳帧阶梯。
+    // v1.0.21：开机 /sdcard FUSE 可能未就绪——daemon（post-fs-data 阶段）常早于
+    // 存储挂载完成，此时生成 USER_CONFIG 必然双写失败（2026-10-24 19:41:02 真机
+    // 复现：2 条误导性 WARN + retry_count 误 +1）。首次生成前有界等待存储就绪
+    // （上限 30s，1s 步进，可被停止信号打断；超时则照旧走，失败路径自愈）。
+    if (!xdd::nd_exists("/sdcard/Android")) {
+        xdd::log_line(xdd::LogLevel::Info, "等待 /sdcard 存储就绪（首次 fas 配置生成）…");
+        for (int i = 0; i < 30 && !g_stop_atomic.load(); ++i) {
+            if (xdd::nd_exists("/sdcard/Android")) break;
+            ::sleep(1);
+        }
+    }
+    // v1.0.21：清理上次会话的崩溃残留（stale mode 节点 + 僵尸进程）再继续，
+    // 否则残留节点会让本次启动的 fas_running() 判活失真
+    xdd::fas_reap_and_check();
     {
         int fasn = xdd::fas_generate_toml();
         if (fasn > 0) {
@@ -554,6 +568,13 @@ int cmd_daemon() {
                 std::string m;
                 if (xdd::conf_get(perapp.kv, "mode", m)) perapp_mode = m;
             }
+        }
+
+        // ---- v1.0.21：僵尸回收 + fas-rs stale 崩溃恢复（假接管根治）----
+        // 必须在托管判定之前：崩溃残留被清掉后，下面的 fas_running() 才会
+        // 诚实返回 false，频率维度及时交还内置阶梯
+        if (xdd::fas_reap_and_check()) {
+            cur_key.clear();  // 频率现场已被还原，强制重新落地
         }
 
         // ---- v1.0.18 fas-rs 托管：当前应用是否把频率维度交给帧感知调度 ----

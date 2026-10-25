@@ -199,6 +199,10 @@ bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
 rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"*
 mkdir -p "$XD_ROOT/dev/fas_rs"
 echo balance > "$XD_ROOT/dev/fas_rs/mode"     # 模拟 fas-rs 运行中的模式节点
+# v1.0.21：pid 活性判活的前提——同时模拟活着的 fas-rs 进程与 pid 文件
+mkdir -p "$XD_ROOT/proc/31568"
+echo "fas-rs" > "$XD_ROOT/proc/31568/cmdline"
+echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"
 # 预置一份「脏」USER_CONFIG（v1.0.19）：验证 daemon 启动时把它覆盖为合法配置
 mkdir -p "$XD_ROOT/sdcard/Android/fas-rs"
 echo "# 脏内容：缺全部必填 section，fas-rs 读到会 panic" > "$XD_ROOT/sdcard/Android/fas-rs/games.toml"
@@ -239,6 +243,10 @@ bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
 rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"*
 mkdir -p "$XD_ROOT/dev/fas_rs"
 echo balance > "$XD_ROOT/dev/fas_rs/mode"     # fas-rs 仍在跑，但当前应用未托管
+# v1.0.21：同样补活进程 mock——证明让位条件是「应用托管」而非进程在跑
+mkdir -p "$XD_ROOT/proc/31568"
+echo "fas-rs" > "$XD_ROOT/proc/31568/cmdline"
+echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"
 cp "$REPO/config/perapp/com.tencent.tmgp.sgame.conf" "$REPO/config/perapp/com.tencent.tmgp.sgame.conf.testbak"
 cat > "$REPO/config/perapp/com.tencent.tmgp.sgame.conf" <<'EOF'
 mode=game
@@ -253,6 +261,85 @@ chk "live 快照 FAS=0" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/st
 kill -TERM "$DPIDF2" 2>/dev/null
 sleep 2
 mv "$REPO/config/perapp/com.tencent.tmgp.sgame.conf.testbak" "$REPO/config/perapp/com.tencent.tmgp.sgame.conf"
+
+say "fas-rs 假接管根治（v1.0.21）"
+# 真机事故（2026-10-24 两次复现）：fas-rs 崩溃后 /dev/fas_rs/mode 节点残留 +
+# state/fas.pid 指着僵尸 31568 → 旧判活（只查节点存在）把已死的 fas-rs 判成
+# 「运行中」→ 主循环把频率维度让位给死人，游戏期间频率干预完全空缺。
+# v1.0.21 起判活 = 节点在 + 进程真活着（pid 文件有效/孤儿领养，僵尸与
+# pid 复用天然排除），并配套 stale 清理（还原基线+清节点+记失败+诊断）。
+
+# ---- 场景 1：节点残留 + pid 指着已死进程（无 /proc 条目）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+mkdir -p "$XD_ROOT/dev/fas_rs"
+echo balance > "$XD_ROOT/dev/fas_rs/mode"                   # 崩溃残留节点
+echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"  # 指着已死 pid
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDS=$!
+sleep 5
+chk "假接管不再发生（live FAS=0）" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "频率干预恢复落地（policy0=1152000）" sh -c "grep -q 1152000 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
+chk "崩溃诊断入日志" sh -c "grep -q 'fas-rs 已崩溃' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+chk "残留 mode 节点被清" sh -c "[ ! -f '$XD_ROOT/dev/fas_rs/mode' ]"
+chk "失败计数记 1" sh -c "[ \"\$(cat '$XD_ROOT/data/adb/WY925976742/state/fas.retry_count' 2>/dev/null)\" = 1 ]"
+kill -TERM "$DPIDS" 2>/dev/null
+sleep 2
+
+# ---- 场景 2：pid 复用——pid 文件指向别的进程（cmdline 不含 fas-rs）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+mkdir -p "$XD_ROOT/dev/fas_rs"
+echo balance > "$XD_ROOT/dev/fas_rs/mode"
+echo 1234 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"   # 1234 是 mock 里的 sgame
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDR=$!
+sleep 5
+chk "pid 复用不误判（live FAS=0）" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
+kill -TERM "$DPIDR" 2>/dev/null
+sleep 2
+
+# ---- 场景 3：僵尸进程——/proc/<pid>/cmdline 为空（僵尸特征）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+mkdir -p "$XD_ROOT/dev/fas_rs" "$XD_ROOT/proc/31568"
+echo balance > "$XD_ROOT/dev/fas_rs/mode"
+: > "$XD_ROOT/proc/31568/cmdline"                           # 僵尸：cmdline 为空
+echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDZ=$!
+sleep 5
+chk "僵尸不判活（live FAS=0）" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
+kill -TERM "$DPIDZ" 2>/dev/null
+sleep 2
+
+# ---- 场景 4：孤儿领养——无 pid 文件但 /proc 里有活 fas-rs（daemon 重启场景）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"*
+mkdir -p "$XD_ROOT/sdcard/Android/fas-rs" "$XD_ROOT/dev/fas_rs" "$XD_ROOT/proc/31568"
+echo balance > "$XD_ROOT/dev/fas_rs/mode"
+echo "fas-rs" > "$XD_ROOT/proc/31568/cmdline"               # 活着的 fas-rs（孤儿）
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDA=$!
+sleep 5
+chk "孤儿领养判活（live FAS=1）" sh -c "grep -q 'FAS=1' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "领养后补写 pid 文件" sh -c "grep -q 31568 '$XD_ROOT/data/adb/WY925976742/state/fas.pid'"
+kill -TERM "$DPIDA" 2>/dev/null
+sleep 2
+
+# ---- 场景 5：开机 /sdcard 未就绪——有界等待 + 就绪后补写 ----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -rf "$XD_ROOT/sdcard"                                    # 模拟 FUSE 未挂载
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDB=$!
+sleep 3
+chk "存储未就绪时不写 USER_CONFIG" sh -c "[ ! -f '$XD_ROOT/sdcard/Android/fas-rs/games.toml' ]"
+chk "存储未就绪时 daemon 仍存活（等待中）" sh -c "[ -d /proc/$DPIDB ]"
+mkdir -p "$XD_ROOT/sdcard/Android/fas-rs"                   # 模拟存储就绪
+sleep 4
+chk "存储就绪后补写 USER_CONFIG" sh -c "[ -s '$XD_ROOT/sdcard/Android/fas-rs/games.toml' ]"
+kill -TERM "$DPIDB" 2>/dev/null
+sleep 2
 
 say "单实例保护（flock）"
 # 第一个 daemon 持锁运行，第二个实例必须直接退出（双 daemon 会互相覆盖节点）
