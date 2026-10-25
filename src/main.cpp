@@ -48,7 +48,7 @@ void on_signal(int) {
 // 二进制自报版本：必须与 module.prop 的 version= 一致。
 // tools/build.ps1 在每次构建前会自动从 module.prop 同步此行（防漂移）；
 // 若手动编译忘记同步，run_tests.sh 的版本一致性断言会抓到。
-const char* kVersion = "1.0.21";
+const char* kVersion = "1.0.22";
 
 void usage() {
     std::fprintf(stderr,
@@ -457,6 +457,12 @@ int cmd_daemon() {
         for (int i = 0; i < 30 && !g_stop_atomic.load(); ++i) {
             if (xdd::nd_exists("/sdcard/Android")) break;
             ::sleep(1);
+            // 等待期间持续刷心跳与 tick——否则看门狗 60s 无 tick 会误杀
+            // （v1.0.21 真机实测：存储 81s 才就绪，daemon 被连杀重启 4 次）
+            xdd::write_heartbeat();
+            g_last_tick.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count());
         }
     }
     // v1.0.21：清理上次会话的崩溃残留（stale mode 节点 + 僵尸进程）再继续，
