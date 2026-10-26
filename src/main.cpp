@@ -48,7 +48,7 @@ void on_signal(int) {
 // 二进制自报版本：必须与 module.prop 的 version= 一致。
 // tools/build.ps1 在每次构建前会自动从 module.prop 同步此行（防漂移）；
 // 若手动编译忘记同步，run_tests.sh 的版本一致性断言会抓到。
-const char* kVersion = "1.2.1";
+const char* kVersion = "1.2.2";
 
 void usage() {
     std::fprintf(stderr,

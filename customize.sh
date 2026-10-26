@@ -21,6 +21,29 @@ command -v set_perm_recursive >/dev/null 2>&1 || set_perm_recursive() {
     chmod -R "$3" "$5" 2>/dev/null
 }
 
+# ---------------- 音量键选择 ----------------
+# Magisk/KernelSU 安装器没有 stdin 弹窗，但可以用 getevent 读取音量键。
+# 返回 up / down；超时或无法读取返回非零。
+wait_volume_key() {
+    local timeout_s="${1:-10}"
+    local ge=/system/bin/getevent
+    [ -x "$ge" ] || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+
+    local i=0
+    while [ "$i" -lt "$timeout_s" ]; do
+        # -c 1：读到一个事件就退出，避免 getevent 输出缓冲导致按键读不到
+        local line
+        line="$(timeout 1 "$ge" -l -q -c 1 2>/dev/null)"
+        case "$line" in
+            *KEY_VOLUMEUP*)   echo up;   return 0 ;;
+            *KEY_VOLUMEDOWN*) echo down; return 0 ;;
+        esac
+        i=$((i + 1))
+    done
+    return 1
+}
+
 if [ -z "$MODPATH" ]; then
     MODPATH="$(dirname "$0")"
 fi
@@ -88,12 +111,10 @@ if [ -n "$CONFLICT" ]; then
     ui_print "   建议只保留一个，或在 WebUI 中关闭一个调度的对应能力。"
 fi
 
-# ---------------- 配置升级：默认保留旧配置 ----------------
-# 刷入新版时，zip 里的 config/ 会覆盖旧模块目录。这里在安装阶段把旧配置
-# 备份并回填到新模块目录，默认“不覆盖”；只有用户显式创建
-# /data/adb/WY925976742/state/overwrite_config 时才使用新版默认配置。
-# 安装器无法交互提问（Magisk/KSU 只提供 ui_print），用“默认保留 + 显式确认”
-# 实现同样的确认语义，避免升级丢配置。
+# ---------------- 配置升级：音量键确认 ----------------
+# 刷入新版时，zip 里的 config/ 会覆盖旧模块目录。这里先备份旧配置，再用
+# 音量键询问：上=保留旧配置（默认），下=覆盖为新版默认配置。
+# 也保留非交互标记 overwrite_config，方便 adb/脚本明确选择覆盖。
 OLD_MOD=/data/adb/modules/WY925976742
 XDD_HOME=/data/adb/WY925976742
 OVERWRITE_FLAG="$XDD_HOME/state/overwrite_config"
@@ -106,19 +127,41 @@ if [ -d "$OLD_MOD/config" ] && [ -n "$(ls -A "$OLD_MOD/config" 2>/dev/null)" ]; 
     if ! cp -rf "$OLD_MOD/config" "$BACKUP_DIR" 2>/dev/null; then
         abort "! 旧配置备份失败（$BACKUP_DIR），为避免覆盖已中止安装"
     fi
+
+    OVERWRITE=0
     if [ -f "$OVERWRITE_FLAG" ]; then
         rm -f "$OVERWRITE_FLAG" 2>/dev/null
-        ui_print " 配置升级：已确认覆盖，使用新版默认配置"
+        OVERWRITE=1
+        ui_print " 配置升级：检测到 overwrite_config 标记，覆盖为新版默认配置"
+    else
+        ui_print " 配置升级：检测到旧版配置"
+        ui_print "   音量上 = 保留旧配置（推荐，10 秒无操作默认）"
+        ui_print "   音量下 = 覆盖为新版默认配置"
+        ui_print "   请现在按音量键选择..."
+        KEY="$(wait_volume_key 10)" || KEY=""
+        case "$KEY" in
+            down)
+                OVERWRITE=1
+                ui_print "   已选择：覆盖为新版默认配置"
+                ;;
+            up)
+                ui_print "   已选择：保留旧配置"
+                ;;
+            *)
+                ui_print "   未检测到音量键，默认保留旧配置"
+                ;;
+        esac
+    fi
+
+    if [ "$OVERWRITE" = "1" ]; then
         ui_print "   旧配置备份：$BACKUP_DIR"
     else
         if ! cp -rf "$OLD_MOD/config/." "$MODPATH/config/" 2>/dev/null; then
             abort "! 旧配置保留失败（$MODPATH/config），为避免丢配置已中止安装"
         fi
-        ui_print " 配置升级：检测到旧版配置，已保留（默认不覆盖）"
-        ui_print "   旧配置备份：$BACKUP_DIR"
-        ui_print "   如需改用新版默认配置：安装前执行"
+        ui_print "   已保留旧配置，备份：$BACKUP_DIR"
+        ui_print "   如需覆盖，也可安装前执行："
         ui_print "   su -c 'mkdir -p $XDD_HOME/state && touch $OVERWRITE_FLAG'"
-        ui_print "   再次刷入本模块即可。"
     fi
 else
     [ -f "$OVERWRITE_FLAG" ] && rm -f "$OVERWRITE_FLAG" 2>/dev/null
