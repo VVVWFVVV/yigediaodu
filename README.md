@@ -2,7 +2,7 @@
 
 > KernelSU 日用省电与游戏稳帧双场景调度模块
 
-![version](https://img.shields.io/badge/version-v1.2.0-blue)
+![version](https://img.shields.io/badge/version-v1.2.1-blue)
 ![platform](https://img.shields.io/badge/platform-Android%2015%2B-green)
 ![kernel](https://img.shields.io/badge/kernel-6.6%2B-orange)
 ![root](https://img.shields.io/badge/root-KernelSU-red)
@@ -57,6 +57,18 @@
 3. 重启
 
 > **注意**：如果之前安装过旧版「新调度」（id=`xindiaodu`），请先卸载旧版再安装本版本。
+
+### 升级时如何对待旧配置
+
+刷入新版时，安装脚本默认**保留旧配置**（`settings.conf`、`profiles/`、`perapp/`），并自动备份到 `/data/adb/WY925976742/config_backup/<时间>/`，不会直接覆盖。
+
+如果要改用新版默认配置，在安装前显式确认：
+
+```sh
+adb shell su -c 'mkdir -p /data/adb/WY925976742/state && touch /data/adb/WY925976742/state/overwrite_config'
+```
+
+再刷入 zip，安装器检测到 `overwrite_config` 后才会使用新版默认配置，并在用完后删除该标记。Magisk/KernelSU 安装器本身不支持交互式“是/否”弹窗，所以用“默认保留 + 显式标记确认”实现同样的保护。
 
 ## 配置
 
@@ -174,4 +186,4 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 ---
 
-**作者**：晚吟 | **版本**：v1.2.0
+**作者**：晚吟 | **版本**：v1.2.1

@@ -51,6 +51,18 @@
 
 导出的方法：设置页 → 导出配置。
 
+### 升级安装与配置保留
+
+刷入新版时，`customize.sh` 默认**保留旧配置**：安装前把旧模块的 `config/` 备份到 `/data/adb/WY925976742/config_backup/<时间>/`，再回填到新模块，避免升级覆盖。
+
+要使用新版默认配置，安装前先显式创建确认标记，再刷 zip：
+
+```sh
+adb shell su -c 'mkdir -p /data/adb/WY925976742/state && touch /data/adb/WY925976742/state/overwrite_config'
+```
+
+安装器检测到该标记才会覆盖，并在使用后删除。Magisk/KernelSU 安装器不支持交互式弹窗，因此用“默认保留 + 显式确认”的方式实现。
+
 ### per-app 独立调优
 
 per-app 配置支持**覆盖档位同名参数**——`mode` 决定套用哪个档位，其余键覆盖该档位的参数值。例如：

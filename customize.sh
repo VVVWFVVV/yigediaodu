@@ -88,8 +88,44 @@ if [ -n "$CONFLICT" ]; then
     ui_print "   建议只保留一个，或在 WebUI 中关闭一个调度的对应能力。"
 fi
 
+# ---------------- 配置升级：默认保留旧配置 ----------------
+# 刷入新版时，zip 里的 config/ 会覆盖旧模块目录。这里在安装阶段把旧配置
+# 备份并回填到新模块目录，默认“不覆盖”；只有用户显式创建
+# /data/adb/WY925976742/state/overwrite_config 时才使用新版默认配置。
+# 安装器无法交互提问（Magisk/KSU 只提供 ui_print），用“默认保留 + 显式确认”
+# 实现同样的确认语义，避免升级丢配置。
+OLD_MOD=/data/adb/modules/WY925976742
+XDD_HOME=/data/adb/WY925976742
+OVERWRITE_FLAG="$XDD_HOME/state/overwrite_config"
+
+ui_print " "
+if [ -d "$OLD_MOD/config" ] && [ -n "$(ls -A "$OLD_MOD/config" 2>/dev/null)" ]; then
+    mkdir -p "$XDD_HOME/config_backup" 2>/dev/null
+    STAMP="$(date +%Y%m%d-%H%M%S)"
+    BACKUP_DIR="$XDD_HOME/config_backup/$STAMP"
+    if ! cp -rf "$OLD_MOD/config" "$BACKUP_DIR" 2>/dev/null; then
+        abort "! 旧配置备份失败（$BACKUP_DIR），为避免覆盖已中止安装"
+    fi
+    if [ -f "$OVERWRITE_FLAG" ]; then
+        rm -f "$OVERWRITE_FLAG" 2>/dev/null
+        ui_print " 配置升级：已确认覆盖，使用新版默认配置"
+        ui_print "   旧配置备份：$BACKUP_DIR"
+    else
+        if ! cp -rf "$OLD_MOD/config/." "$MODPATH/config/" 2>/dev/null; then
+            abort "! 旧配置保留失败（$MODPATH/config），为避免丢配置已中止安装"
+        fi
+        ui_print " 配置升级：检测到旧版配置，已保留（默认不覆盖）"
+        ui_print "   旧配置备份：$BACKUP_DIR"
+        ui_print "   如需改用新版默认配置：安装前执行"
+        ui_print "   su -c 'mkdir -p $XDD_HOME/state && touch $OVERWRITE_FLAG'"
+        ui_print "   再次刷入本模块即可。"
+    fi
+else
+    [ -f "$OVERWRITE_FLAG" ] && rm -f "$OVERWRITE_FLAG" 2>/dev/null
+    ui_print " 配置升级：未检测到旧版配置，使用新版默认配置"
+fi
+
 # ---------------- 运行时目录 ----------------
-XDD_HOME=/data/adb/WYWY925976742
 mkdir -p "$XDD_HOME/log" "$XDD_HOME/state" "$XDD_HOME/baseline" "$XDD_HOME/tmp" 2>/dev/null
 chmod 0700 "$XDD_HOME" 2>/dev/null
 
