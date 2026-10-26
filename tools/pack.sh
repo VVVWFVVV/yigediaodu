@@ -87,7 +87,7 @@ import os, sys, zipfile
 
 root, zip_path = sys.argv[1], sys.argv[2]
 top_files = ["module.prop", "customize.sh", "post-fs-data.sh", "service.sh",
-             "action.sh", "uninstall.sh", "system.prop"]
+             "action.sh", "uninstall.sh", "system.prop", "README.md", "CHANGELOG.md"]
 top_dirs = ["script", "config", "webroot", "META-INF", "libs", "docs"]
 
 count = 0

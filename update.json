@@ -1,5 +1,6 @@
 {
-  "versionCode": 27,
-  "version": "v1.2.2",
-  "zipUrl": "https://github.com/VVVWFVVV/yigediaodu/releases/download/v1.2.2/WY925976742-v1.2.2.zip"
+  "versionCode": 28,
+  "version": "v1.2.3",
+  "zipUrl": "https://github.com/VVVWFVVV/yigediaodu/releases/download/v1.2.3/WY925976742-v1.2.3.zip",
+  "changelog": "v1.2.3\n- 新增 CHANGELOG.md，并在 update.json 提供 changelog\n- 模块 zip 包含更新日志\n\nv1.2.2\n- 升级安装支持音量键确认：上=保留旧配置，下=覆盖默认配置\n- 旧配置自动备份到 /data/adb/WY925976742/config_backup/\n\nv1.2.1\n- 升级默认保留旧配置，新增 overwrite_config 显式覆盖标记\n\nv1.2.0\n- 移除 fas-rs\n- framestats 真实 FPS + 探针回退，修复启动/大厅误升档\n- 温控按 CPU/GPU 温区，IO/写节点/息屏开销优化"
 }

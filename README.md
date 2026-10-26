@@ -2,7 +2,7 @@
 
 > KernelSU 日用省电与游戏稳帧双场景调度模块
 
-![version](https://img.shields.io/badge/version-v1.2.2-blue)
+![version](https://img.shields.io/badge/version-v1.2.3-blue)
 ![platform](https://img.shields.io/badge/platform-Android%2015%2B-green)
 ![kernel](https://img.shields.io/badge/kernel-6.6%2B-orange)
 ![root](https://img.shields.io/badge/root-KernelSU-red)
@@ -181,8 +181,13 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 │   ├── mock_tree.sh            #   模拟设备树
 │   └── js_smoke.js             #   前端冒烟（36 项）
 ├── tools/                      # 构建/打包工具
-└── docs/                       # 文档
+├── docs/                       # 文档
+└── CHANGELOG.md                # 更新日志
 ```
+
+## 更新日志
+
+见 [CHANGELOG.md](CHANGELOG.md)。`update.json` 里也带有 `changelog` 字段，KernelSU 更新页可直接显示。
 
 ## 致谢
 
@@ -191,4 +196,4 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 ---
 
-**作者**：晚吟 | **版本**：v1.2.2
+**作者**：晚吟 | **版本**：v1.2.3
