@@ -219,7 +219,7 @@ echo -:fm_probe > /sys/kernel/tracing/uprobe_events
 - state/ 文件（v1.2.0 当前）：capability、current、heartbeat、live；旧版 `fas.pid`/`fas.retry_count` 已由 post-fs-data 清理
 - live 快照（历史 v1.1.0）：`PKG=me.weishu.kernelsu`、`FAMILY=daily`、`TEMP=61`（℃）、`FREQ=2227200,1017600`、`FPS_LEVEL=0`、`THERM=1`、`FAS=0`、`FASMODE=-`。v1.2.0 已删除 FAS/FASMODE，新增 `TEMP_ZONE`/`TEMP_MAX`/`TEMP_MAX_ZONE`/`PROBE_FPS`/`JANK`
 - capability 实况（daily 档）：cpu=off cpuset=ok threads=off gpu=off io=ok mem=ok thermal=off fps=off（game 档下 gpu/threads 为降级态）
-- 配置路径分工：profiles/perapp/settings.conf 在模块目录 `/data/adb/modules/WY925976742/config/`（perapp 7 个：bilibili/arknights/Yuanshen/cf/pubgmhd/sgame/tv.bili）；v1.2.0 起 `/data/adb/WY925976742/config/` 不再生成 fas_games.toml
+- 配置路径分工：profiles/perapp/settings.conf 在模块目录 `/data/adb/modules/WY925976742/config/`（perapp 8 个：bilibili/arknights/Yuanshen/cf/pubgmhd/sgame/tv.bili/jkchess）；v1.2.0 起 `/data/adb/WY925976742/config/` 不再生成 fas_games.toml
 - USER_CONFIG `/sdcard/Android/fas-rs/games.toml` 已由 v1.2.0 启动脚本清理（仅删除首行为本模块生成标记的文件）
 - **已知异常**：supervisor 全天多条「心跳超时（42s~450s，连续第 1 次）」（01:51-04:13 十条 + 18:53 一次 450s），daemon 均自行恢复；根因待排查（疑与某同步调用阻塞/休眠有关）
 

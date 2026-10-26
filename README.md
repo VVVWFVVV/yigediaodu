@@ -2,7 +2,7 @@
 
 > KernelSU 日用省电与游戏稳帧双场景调度模块
 
-![version](https://img.shields.io/badge/version-v1.2.3-blue)
+![version](https://img.shields.io/badge/version-v1.2.4-blue)
 ![platform](https://img.shields.io/badge/platform-Android%2015%2B-green)
 ![kernel](https://img.shields.io/badge/kernel-6.6%2B-orange)
 ![root](https://img.shields.io/badge/root-KernelSU-red)
@@ -24,7 +24,7 @@
 ### per-app 独立调优
 - 每个应用可锁定档位（`mode=game` / `daily-plus` 等）
 - 支持覆盖档位同名参数，每应用独立调优互不影响
-- 内置 7 个应用配置（和平精英/原神/王者/穿越火线/明日方舟/哔哩哔哩×2）
+- 内置 8 个应用配置（和平精英/原神/王者/穿越火线/明日方舟/金铲铲之战/哔哩哔哩×2）
 
 ### WebUI 面板（四标签）
 - **总览**：实时状态（前台应用/档位/温度/频率/帧率/干预能力）
@@ -140,7 +140,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
 ### 测试
-- **host 测试**（169 项）：模拟设备树，验证配置解析/节点写入/绑核/频率吸附/稳帧阶梯/per-app 覆盖等
+- **host 测试**（170 项）：模拟设备树，验证配置解析/节点写入/绑核/频率吸附/稳帧阶梯/per-app 覆盖等
 - **前端冒烟**（36 项）：Node.js mock DOM，验证 WebUI 四页面渲染与 API 交互
 
 ## 目录结构
@@ -177,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 │   └── assets/                 #   bridge.js / api.js / app.js / pages.js
 ├── config/                     # 配置文件
 ├── test/                       # 测试
-│   ├── run_tests.sh            #   host 测试（169 项）
+│   ├── run_tests.sh            #   host 测试（170 项）
 │   ├── mock_tree.sh            #   模拟设备树
 │   └── js_smoke.js             #   前端冒烟（36 项）
 ├── tools/                      # 构建/打包工具
@@ -196,4 +196,4 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 ---
 
-**作者**：晚吟 | **版本**：v1.2.3
+**作者**：晚吟 | **版本**：v1.2.4

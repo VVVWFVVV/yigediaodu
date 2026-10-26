@@ -155,5 +155,5 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
-host 测试在 WSL 里对模拟设备树跑 169 项用例；前端有 36 项 Node 冒烟测试。
+host 测试在 WSL 里对模拟设备树跑 170 项用例；前端有 36 项 Node 冒烟测试。
 改 `src/*.cpp` 后重新跑 `build.ps1` 即可，测试全过才允许打包。

@@ -524,8 +524,8 @@ done < <(grep -E '^(fps\.steps\.p[01]|thermal\.cap\.p[01])=' "$REPO/config/setti
 chk "全部配置频率值合法（在真机频率表内）" test -z "$FREQ_BAD"
 [ -n "$FREQ_BAD" ] && echo "    非法值:$FREQ_BAD"
 
-# 3) fcctl list 包含全部 7 个 perapp 配置
-chk "list 包含 7 个 per-app 配置" sh -c "sh '$FC' list | grep -q 'com.tencent.tmgp.pubgmhd' && sh '$FC' list | grep -q 'tv.bili' && sh '$FC' list | grep -q 'com.tencent.tmgp.cf' && sh '$FC' list | grep -q 'com.hypergryph.arknights'"
+# 3) fcctl list 包含全部 8 个 perapp 配置
+chk "list 包含 8 个 per-app 配置" sh -c "sh '$FC' list | grep -q 'com.tencent.tmgp.pubgmhd' && sh '$FC' list | grep -q 'tv.bili' && sh '$FC' list | grep -q 'com.tencent.tmgp.cf' && sh '$FC' list | grep -q 'com.hypergryph.arknights' && sh '$FC' list | grep -q 'com.tencent.jkchess'"
 
 # 还原配置
 mv "$REPO/config/settings.conf.testbak" "$REPO/config/settings.conf"

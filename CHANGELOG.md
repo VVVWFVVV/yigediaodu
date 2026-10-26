@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.2.4 — 2026-10-26
+
+- 新增「金铲铲之战」（`com.tencent.jkchess`）per-app 配置：
+  - 套用游戏档，CPU 下限 960/1210MHz，GPU 下限 342MHz。
+  - Unity 渲染线程绑大核，主线程/Worker/TaskGraph 留中核。
+  - 60fps 稳帧阶梯 + 卡顿阈值 8%，减少自走棋转场/技能特效误升档。
+- host 170/170，前端 36/36。
+
 ## v1.2.3 — 2026-10-26
 
 - 新增本更新日志，并在 `update.json` 中提供 `changelog` 字段，KernelSU 更新页可直接显示。
