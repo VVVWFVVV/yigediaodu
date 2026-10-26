@@ -203,7 +203,8 @@ echo -:fm_probe > /sys/kernel/tracing/uprobe_events
 ~~~
 
 - 符号来源：`adb pull /vendor/lib64/libEGL_adreno.so` → `llvm-nm -D --defined-only` → `eglSwapBuffers @ 0x9ed0`（同库另有 `eglClientWaitSync @ 0xa570`、`eglClientWaitSyncKHR @ 0xa5e0`）
-- **实测**：明日方舟前台稳态，3 秒窗口 182 次命中 = **60.67fps**（游戏锁 60fps，完美吻合；SurfaceFlinger 合成不混入此计数）
+- **实测**：明日方舟前台稳态，3 秒窗口 182 次命中 = **60.67fps**（游戏锁 60fps，吻合）
+- **计数构成（2026-10-26 对局复测修正）**：menu 界面计数≈游戏帧率，但**对局中计数含游戏外的 GL 消费者**（SystemUI/SF 的 GPU 合成、LTPO 动态刷新）——60fps 游戏对局中计数跑到 60-80/s。**FPS 绝对值偏乐观**：绝对阈值判据（低于目标×90%）灵敏度打折（游戏真掉到 45fps 时计数仍有 ~65，不触发）；骤降（如 30fps）仍能捕获。jank 路径仍是主判据，FPS 是从快补充
 - **能力边界**：只有计数、**无时间戳**（此内核动态事件不进任何缓冲）→ 可做实时 FPS/降帧检测；帧间隔分布与卡顿帧定位仍靠 `dumpsys gfxinfo framestats`（现有 jank 阶梯）
 - **注意事项**：① 计数为全进程叠加，仅当前台为单一游戏时≈游戏帧率（后台有其他 GL 应用会混入）→ daemon 应在游戏前台时挂载、退出即卸载；② 事件创建/删除需 root（daemon 的 ksu 域可写 tracefs，实测通过）；③ OTA/刷机后需复核 adreno 库路径与符号偏移
 - 对 v1.1.0 的含义：**帧感知调度在此设备的落地形态 = adreno uprobe 秒级 FPS 信号 + 现有 gfxinfo jank 阶梯**，取代原 fas-rs 的帧监控定位
