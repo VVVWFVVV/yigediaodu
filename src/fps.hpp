@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "frame_probe.hpp"
 #include "nodes.hpp"
 
 namespace xdd {
@@ -32,7 +33,9 @@ bool load_thermal_config(ThermalConfig& out, const std::vector<PolicyInfo>& poli
 
 // 稳帧采样与决策（内部按 sample_ms 节流）
 // temp_milli 由调用方统一提供（与温控共用单一温度源）
-void fps_tick(const std::string& pkg, const FpsConfig& cfg,
+// fpc 非空且启用时，实时 FPS（帧探针）作为第二判据：掉帧升档从快、降档
+// 要求卡顿率与帧率双健康（保守，防单一信号误判）
+void fps_tick(const std::string& pkg, const FpsConfig& cfg, const FrameProbeConfig* fpc,
               const std::vector<PolicyInfo>& policies, int temp_milli);
 
 // 温控阈值封顶（只降不升、滞回恢复）；返回当前是否处于封顶状态

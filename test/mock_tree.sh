@@ -147,7 +147,7 @@ echo 20 > "$PROC/sys/vm/dirty_ratio"
 echo 10 > "$PROC/sys/vm/dirty_background_ratio"
 echo 0 > "$PROC/sys/vm/drop_caches"   # 读回恒 0 的一次性动作节点
 
-# ---------------- GPU devfreq（v1.0.16 A1：游戏 GPU 频率下限） ----------------
+# ---------------- GPU devfreq（v1.0.16 A1：游戏 GPU 频率下限）----------------
 # 真机 KGSL 节点用 **Hz**（10 位数字）：1100000000=1100MHz ... 160000000=160MHz。
 # v1.0.16 ADB 实测抓到：配置若按 kHz 写会被 snap 吸附到最低档（方向反）！
 # 配置与 mock 一律用 Hz（与节点原生单位一致）。KGSL 节点无 scaling_ 前缀。
@@ -157,6 +157,16 @@ echo "1100000000 1050000000 967000000 900000000 832000000 734000000 660000000 60
 echo 160000000 > "$KGSL/min_freq"
 echo 1100000000 > "$KGSL/max_freq"
 echo "msm-adreno-tz" > "$KGSL/governor"
+
+# ---------------- tracefs 帧探针（v1.1.0：adreno uprobe 实时 FPS）----------------
+# 真机路线：写 uprobe_events 注册 + events/uprobes/<名>/enable 启用，
+# 每秒读 uprobe_profile 计数差分。mock 默认空注册表；测试通过改写
+# uprobe_profile 行模拟帧计数流（行格式与真机一致：路径 事件名 计数）。
+TR="$SYS/kernel/tracing"
+mkdir -p "$TR/events/uprobes/xdd_frame"
+: > "$TR/uprobe_events"
+: > "$TR/uprobe_profile"
+echo 0 > "$TR/events/uprobes/xdd_frame/enable"
 
 # ---------------- dumpsys 桩 ----------------
 # 测试通过 $XD_ROOT/state/fg 控制"前台应用"，$XD_ROOT/state/screen 控制亮灭屏
@@ -180,11 +190,14 @@ case "$1" in
         if [ "$screen" = "off" ]; then echo "  mWakefulness=Asleep"; else echo "  mWakefulness=Awake"; fi
         ;;
     gfxinfo)
-        cat <<'FRAMES'
+        # 卡顿率可经 $XD_ROOT/state/jank 覆盖（v1.1.0：隔离测试 FPS 判据时
+        # 把卡顿率压到阈值以下，默认 6.00% 保持既有用例行为）
+        jank=$(cat "$STATE/jank" 2>/dev/null || echo "6.00")
+        cat <<FRAMES
 ** Graphics info for package 'com.tencent.tmgp.sgame' (pid 1234) **
 Stats since: 1234567890ns
 Total frames rendered: 600
-Janky frames: 36 (6.00%)
+Janky frames: 36 (${jank}%)
 50th percentile: 16667ms
 90th percentile: 17000ms
 95th percentile: 18000ms

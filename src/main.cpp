@@ -27,6 +27,7 @@
 #include "config.hpp"
 #include "engine.hpp"
 #include "fas.hpp"
+#include "frame_probe.hpp"
 #include "fps.hpp"
 #include "log.hpp"
 #include "monitor.hpp"
@@ -48,7 +49,7 @@ void on_signal(int) {
 // 二进制自报版本：必须与 module.prop 的 version= 一致。
 // tools/build.ps1 在每次构建前会自动从 module.prop 同步此行（防漂移）；
 // 若手动编译忘记同步，run_tests.sh 的版本一致性断言会抓到。
-const char* kVersion = "1.0.22";
+const char* kVersion = "1.1.0";
 
 void usage() {
     std::fprintf(stderr,
@@ -440,9 +441,11 @@ int cmd_daemon() {
     xdd::ModuleSettings s;
     xdd::load_settings(s);
     xdd::FpsConfig fcfg;
+    xdd::FrameProbeConfig fpc;
     xdd::ThermalConfig tcfg;
     auto policies = xdd::detect_policies();
     xdd::load_fps_config(fcfg, policies);
+    xdd::load_frame_probe_config(fpc);
     xdd::load_thermal_config(tcfg, policies);
 
     // v1.0.17：fas games.toml 生成（配置桥，始终生成——无二进制时也可供检查）；
@@ -542,6 +545,7 @@ int cmd_daemon() {
             xdd::load_settings(s);
             policies = xdd::detect_policies();
             xdd::load_fps_config(fcfg, policies);
+            xdd::load_frame_probe_config(fpc);
             xdd::load_thermal_config(tcfg, policies);
             // v1.0.17：per-app fas 配置可能变了——重新生成 games.toml，
             // 内容有变且 fas-rs 在跑则重启加载新配置
@@ -651,6 +655,9 @@ int cmd_daemon() {
                             for (const auto& kv : perapp.kv) fpsOver.push_back(kv);
                         }
                         xdd::load_fps_config(fcfg, policies, &fpsOver);
+                        // v1.1.0：帧探针的 target_fps 等键走同一 overrides 通道
+                        // （perapp 的 fps.target_fps 覆盖 settings.conf 默认值）
+                        xdd::load_frame_probe_config(fpc, &fpsOver);
                     }
                     xdd::apply_profile(p, fg.pkg);
                     xdd::CurrentState cs;
@@ -677,12 +684,18 @@ int cmd_daemon() {
 
         // ---- 稳帧与温控（仅游戏族；单一温度源） ----
         if (cur_key.find("|game") != std::string::npos && fcfg.enable) {
+            // v1.1.0：帧探针生命周期——游戏前台挂载、离开即卸载（计数只在
+            // 单一游戏前台时≈游戏帧率；start 内部有 g_gave_up 防重试刷屏）
+            if (fpc.enable && !xdd::frame_probe_active()) xdd::frame_probe_start(fpc);
+            xdd::frame_probe_tick();
             xdd::TempInfo ti;
             int temp = xdd::read_max_temp(ti) ? ti.max_milli : 0;
-            xdd::fps_tick(fg.pkg, fcfg, policies, temp);
+            xdd::fps_tick(fg.pkg, fcfg, &fpc, policies, temp);
             if (s.f_thermal) {
                 xdd::thermal_tick(tcfg, policies, temp);
             }
+        } else if (xdd::frame_probe_active()) {
+            xdd::frame_probe_stop();
         }
 
         // ---- v1.0.17 fas 模式仲裁 ----
@@ -723,12 +736,14 @@ int cmd_daemon() {
                 if (!freqs.empty()) freqs += ",";
                 freqs += cur.empty() ? "0" : cur;
             }
+            int probe_fps = xdd::frame_probe_last_fps();
             xdd::write_live({
                 {"PKG", fg.pkg.empty() ? "—" : fg.pkg},
                 {"FAMILY", family},
                 {"TEMP", std::to_string(temp / 1000)},
                 {"FREQ", freqs},
                 {"FPS_LEVEL", std::to_string(xdd::fps_current_level())},
+                {"FPS", probe_fps >= 0 ? std::to_string(probe_fps) : "-"},
                 {"THERM", xdd::thermal_capped() ? "1" : "0"},
                 {"FAS", fas_managed ? "1" : "0"},
                 {"FASMODE", g_fas_mode.empty() ? "-" : g_fas_mode},
@@ -772,6 +787,8 @@ int cmd_daemon() {
     }
     // v1.0.17：退出时停 fas-rs（防模块停用后它还在调频率）
     if (xdd::fas_running()) xdd::fas_stop();
+    // v1.1.0：卸载帧探针 uprobe 事件（防 daemon 退出后事件残留内核）
+    xdd::frame_probe_stop();
     xdd::log_line(xdd::LogLevel::Info, "守护进程退出");
     return 0;
 }

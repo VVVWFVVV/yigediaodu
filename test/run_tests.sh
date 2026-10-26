@@ -341,6 +341,78 @@ chk "存储就绪后补写 USER_CONFIG" sh -c "[ -s '$XD_ROOT/sdcard/Android/fas
 kill -TERM "$DPIDB" 2>/dev/null
 sleep 2
 
+say "帧监控探针（v1.1.0 adreno uprobe）"
+# 真机路线（2026-10-25 实测跑通 60.67fps）：tracefs uprobe 挂
+# /vendor/lib64/libEGL_adreno.so:0x9ed0（eglSwapBuffers）+ uprobe_profile
+# 计数差分。host 用 mock tracefs：测试改写 profile 行模拟帧计数流。
+TR="$XD_ROOT/sys/kernel/tracing"
+
+# ---- 场景 1：探针启动（注册+启用+能力+perapp 目标帧率通道）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDP=$!
+sleep 5
+chk "uprobe 事件已注册（adreno eglSwapBuffers）" sh -c "grep -q 'p:xdd_frame /vendor/lib64/libEGL_adreno.so:0x9ed0' '$TR/uprobe_events'"
+chk "事件已启用" sh -c "grep -q '^1$' '$TR/events/uprobes/xdd_frame/enable'"
+chk "frame 能力 ok" sh -c "grep -q 'frame=ok' '$XD_ROOT/data/adb/WY925976742/state/capability'"
+chk "启动日志记录符号与目标" sh -c "grep -q '帧探针已启动' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+chk "perapp 目标帧率生效（sgame=120）" sh -c "grep -q '目标 120fps' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+
+# ---- 场景 2+3：持续 30fps 计数流（目标 120 → 持续低帧）----
+# 卡顿率压到阈值以下，隔离出 FPS 判据（否则 dumpsys 桩的 6% 会抢先升档）
+echo "0.50" > "$XD_ROOT/state/jank"
+# 后台写入器：每秒 +30 计数，持续到测试显式杀死（采样间隔不论多长，差分比≈30fps）
+( for i in $(seq 1 90); do
+    echo "  /vendor/lib64/libEGL_adreno.so xdd_frame   $((100 + i * 30))" > "$TR/uprobe_profile"
+    sleep 1
+done ) &
+WRITER=$!
+sleep 10
+chk "live 上报实时 FPS（30 上下）" sh -c "grep -qE 'FPS=(1[5-9]|2[0-9]|3[0-9]|4[0-5])' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "低 FPS 触发升档（FPS_LEVEL>=1）" sh -c "grep -qE 'FPS_LEVEL=[1-9]' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "升档写阶梯值（1152000 或 1785600）" sh -c "grep -qE '1152000|1785600' '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
+chk "升档日志带帧率判据（而非卡顿率）" sh -c "grep -q '实时帧率' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+kill "$WRITER" 2>/dev/null
+wait "$WRITER" 2>/dev/null
+rm -f "$XD_ROOT/state/jank"
+
+# ---- 场景 4：静态计数（符号从未被调用）→ 自校验降级 ----
+# 注意自校验规则是「启动至今从未变化」——渲染中途静止画面是合法 0 帧不触罚，
+# 所以降级场景必须用全新 daemon（探针从启动起就没见过计数增长）
+kill -TERM "$DPIDP" 2>/dev/null
+sleep 2
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+echo "  /vendor/lib64/libEGL_adreno.so xdd_frame   500" > "$TR/uprobe_profile"
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDP2=$!
+sleep 11
+chk "无计数自动降级（frame=degraded）" sh -c "grep -q 'frame=degraded' '$XD_ROOT/data/adb/WY925976742/state/capability'"
+chk "降级日志提示符号失效" sh -c "grep -q '符号偏移可能已失效' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+chk "探针已停用" sh -c "grep -q '帧探针已停止' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+
+# ---- 场景 5：daemon 退出卸载探针（事件不留内核）----
+kill -TERM "$DPIDP2" 2>/dev/null
+sleep 2
+chk "退出后事件被删除" sh -c "grep -q '^-:xdd_frame' '$TR/uprobe_events'"
+chk "退出后 enable 归 0" sh -c "grep -q '^0$' '$TR/events/uprobes/xdd_frame/enable'"
+chk "退出后进程真正结束" sh -c "[ ! -d /proc/$DPIDP2 ]"
+
+# ---- 场景 6：帧探针可配置关闭（fps.frame_probe=0 时不挂载）----
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+cp "$REPO/config/settings.conf" "$REPO/config/settings.conf.testbak"
+sed -i 's/^fps.frame_probe=1/fps.frame_probe=0/' "$REPO/config/settings.conf"
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDQ=$!
+sleep 4
+chk "关闭时不注册事件" sh -c "[ ! -s '$TR/uprobe_events' ]"
+chk "关闭时 live FPS 为 -" sh -c "grep -q 'FPS=-' '$XD_ROOT/data/adb/WY925976742/state/live'"
+kill -TERM "$DPIDQ" 2>/dev/null
+sleep 2
+mv "$REPO/config/settings.conf.testbak" "$REPO/config/settings.conf"
+
 say "单实例保护（flock）"
 # 第一个 daemon 持锁运行，第二个实例必须直接退出（双 daemon 会互相覆盖节点）
 "$BIN" --daemon >/dev/null 2>&1 &

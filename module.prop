@@ -1,7 +1,7 @@
 id=WY925976742
 name=一个调度
-version=v1.0.22
-versionCode=23
+version=v1.1.0
+versionCode=24
 author=晚吟
-description=日用省电与游戏稳帧双场景调度｜FAS 帧感知调度(fas-rs eBPF 版托管/每游戏独立目标帧率/模式仲裁) · 频率吸附 · UE4/Unity TaskGraph 全变体绑核 · per-app 独立调优 · cpuset v1/v2 自适应 · SELinux 瞬时 permissive · 防冻结+看门狗
+description=日用省电与游戏稳帧双场景调度｜帧监控探针(adreno uprobe 实时 FPS · 掉帧升档从快 · 双信号确认才降档 · 符号失效自动回退) · FAS 帧感知调度(fas-rs eBPF 版托管/每游戏独立目标帧率/模式仲裁) · 频率吸附 · UE4/Unity TaskGraph 全变体绑核 · per-app 独立调优 · cpuset v1/v2 自适应 · SELinux 瞬时 permissive · 防冻结+看门狗
 updateJson=https://raw.githubusercontent.com/VVVWFVVV/yigediaodu/main/update.json

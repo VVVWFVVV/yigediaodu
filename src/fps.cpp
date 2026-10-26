@@ -33,6 +33,7 @@ int g_level = 0;
 long long g_level_since_ms = 0;
 double g_last_jank = -1.0;  // -1=尚无采样数据
 bool g_capped = false;
+int g_fps_low_hits = 0;  // v1.1.0：连续低 FPS 采样计数（探针快路径防抖）
 
 long long now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -154,7 +155,7 @@ bool load_thermal_config(ThermalConfig& out, const std::vector<PolicyInfo>& poli
     return true;
 }
 
-void fps_tick(const std::string& pkg, const FpsConfig& cfg,
+void fps_tick(const std::string& pkg, const FpsConfig& cfg, const FrameProbeConfig* fpc,
               const std::vector<PolicyInfo>& policies, int temp_milli) {
     (void)temp_milli;  // 温度决策在 thermal_tick，此处只用帧统计
     if (!cfg.enable || pkg.empty() || policies.empty() || g_steps.empty()) return;
@@ -174,20 +175,43 @@ void fps_tick(const std::string& pkg, const FpsConfig& cfg,
     if (jank < 0) return;  // 输出没有帧统计（应用可能不在前台渲染）
     g_last_jank = jank;
 
+    // v1.1.0：帧探针实时 FPS 判据（探针未启用/无数据时自动退化为纯卡顿率逻辑）
+    int probe_fps = (fpc && fpc->enable) ? frame_probe_last_fps() : -1;
+    bool fps_low = false;
+    bool fps_healthy = false;
+    if (probe_fps >= 0) {
+        int low_th = fpc->target_fps * fpc->low_ratio / 100;
+        if (probe_fps < low_th) {
+            // 掉帧：连续 min_hold_samples 次才确认（防单次采样抖动误升档）
+            if (++g_fps_low_hits >= fpc->min_hold_samples) fps_low = true;
+        } else {
+            g_fps_low_hits = 0;
+            if (probe_fps >= fpc->target_fps * 98 / 100) fps_healthy = true;
+        }
+    } else {
+        g_fps_low_hits = 0;
+    }
+    set_capability("frame", frame_probe_state());
+
     // 决策：超阈值升档（保持窗口已过才升——防卡顿持续时几秒内冲到顶档）；
-    //       低于阈值一半且保持窗口已过才降档（滞回防震荡）
+    //       低于阈值一半且保持窗口已过才降档（滞回防震荡）。
+    // v1.1.0：升档判据 = 卡顿率超标 **或** 探针确认掉帧（任一从快）；
+    //       降档判据 = 卡顿率低 **且**（探针未启用 **或** 帧率健康）——双信号
+    //       确认才降，防单一信号把卡顿中的游戏误降档
     size_t max_lv = max_level();
     bool changed = false;
-    if (jank >= (double)cfg.jank_threshold) {
+    if (jank >= (double)cfg.jank_threshold || fps_low) {
         if (max_lv > 0 && (size_t)(g_level + 1) < max_lv &&
             now_ms() - g_level_since_ms >= cfg.hold_ms) {
             ++g_level;
             g_level_since_ms = now_ms();
             changed = true;
-            log_line(LogLevel::Info, "稳帧升档 -> " + std::to_string(g_level) +
-                                         "（卡顿率 " + std::to_string(jank) + "%）");
+            std::string why = fps_low && jank < (double)cfg.jank_threshold
+                                  ? "实时帧率 " + std::to_string(probe_fps) + "fps"
+                                  : "卡顿率 " + std::to_string(jank) + "%";
+            log_line(LogLevel::Info, "稳帧升档 -> " + std::to_string(g_level) + "（" + why + "）");
         }
-    } else if (jank < (double)cfg.jank_threshold / 2.0) {
+    } else if (jank < (double)cfg.jank_threshold / 2.0 && (probe_fps < 0 || fps_healthy)) {
         if (g_level > 0 && now_ms() - g_level_since_ms >= cfg.hold_ms) {
             --g_level;
             g_level_since_ms = now_ms();
