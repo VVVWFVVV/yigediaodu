@@ -7,7 +7,7 @@
 //   --restore           按 baseline 快照还原节点
 //   --apply <profile>   立即应用指定档位
 //   --version           版本信息
-//   --probe fg/screen/family/fps/fas   诊断探针
+//   --probe fg/screen/family/fps   诊断探针
 // ============================================================
 
 #include <algorithm>
@@ -26,7 +26,6 @@
 
 #include "config.hpp"
 #include "engine.hpp"
-#include "fas.hpp"
 #include "frame_probe.hpp"
 #include "fps.hpp"
 #include "log.hpp"
@@ -49,7 +48,7 @@ void on_signal(int) {
 // 二进制自报版本：必须与 module.prop 的 version= 一致。
 // tools/build.ps1 在每次构建前会自动从 module.prop 同步此行（防漂移）；
 // 若手动编译忘记同步，run_tests.sh 的版本一致性断言会抓到。
-const char* kVersion = "1.1.0";
+const char* kVersion = "1.2.0";
 
 void usage() {
     std::fprintf(stderr,
@@ -97,13 +96,20 @@ int cmd_selfcheck() {
         }
     }
 
-    // 3) 温度可读
+    // 3) 温度可读：同时报告 SoC 温区（封顶判据）与全机最高温（展示）
     xdd::TempInfo ti;
-    if (xdd::read_max_temp(ti)) {
-        std::printf("[selfcheck] OK 最高温度 %d.%03d℃ (zone=%s)\n", ti.max_milli / 1000,
+    xdd::TempInfo tsoc;
+    bool has_all = xdd::read_max_temp(ti);
+    bool has_soc = xdd::read_max_soc_temp(tsoc);
+    if (has_all) {
+        std::printf("[selfcheck] OK 全机最高温 %d.%03d℃ (zone=%s)\n", ti.max_milli / 1000,
                     ti.max_milli % 1000, ti.zone.c_str());
+    }
+    if (has_soc) {
+        std::printf("[selfcheck] OK SoC 最高温 %d.%03d℃ (zone=%s，CPU 封顶判据)\n",
+                    tsoc.max_milli / 1000, tsoc.max_milli % 1000, tsoc.zone.c_str());
     } else {
-        std::printf("[selfcheck] WARN 温度节点不可读\n");
+        std::printf("[selfcheck] WARN SoC 温区不可读（温控封顶将降级）\n");
     }
 
     // 4) 运行时目录可写
@@ -195,17 +201,7 @@ int cmd_probe(const std::string& what, const std::string& arg) {
                     arg.c_str());
         return 0;
     }
-    if (what == "fas") {
-        // fas-rs 托管状态诊断（v1.0.17）：运行状态/模式/管理应用数/路径
-        xdd::FasStatus st = xdd::fas_status();
-        std::printf("{\"ok\":true,\"data\":{\"running\":%s,\"mode\":\"%s\",\"managed\":%d,"
-                    "\"toml\":\"%s\",\"binary_exists\":%s}}\n",
-                    st.running ? "true" : "false", st.mode.c_str(), st.managed,
-                    xdd::fas_toml_path().c_str(),
-                    xdd::fas_binary_exists() ? "true" : "false");
-        return 0;
-    }
-    std::fprintf(stderr, "未知探针: %s（支持 fg / screen / family / fps / fas）\n", what.c_str());
+    std::fprintf(stderr, "未知探针: %s（支持 fg / screen / family / fps）\n", what.c_str());
     return 2;
 }
 
@@ -275,11 +271,6 @@ int cmd_apply(const std::string& profile) {
                 }
                 if (!found) p.kv.push_back(kv);
             }
-            // v1.0.17：与 daemon 一致——fas-rs 在管该应用的频率时让位，
-            // 否则手动 apply 会写下频率下限挡住 fas-rs 的降频空间
-            if (xdd::fas_running() && xdd::fas_enabled_for(pkg)) {
-                xdd::set_freq_defer_fas(true);
-            }
         }
     }
 
@@ -305,11 +296,6 @@ namespace {
 
 std::atomic<long long> g_last_tick{0};
 std::atomic<bool> g_watchdog_on{false};
-
-// ---- fas-rs 托管状态（v1.0.17，仅 daemon 主循环用）----
-static bool g_fas_managed_prev = false;   // 上一轮 fas 是否在管频率（变化时强制重落地）
-static int g_fas_perf_hits = 0;           // 连续卡顿采样计数（performance 滞回）
-static std::string g_fas_mode;            // 当前仲裁出的 fas 模式（空=未设置）
 
 // 本编译单元内的小工具：去首尾空白
 std::string trim_copy(const std::string& s) {
@@ -424,11 +410,6 @@ int cmd_daemon() {
                           std::chrono::steady_clock::now().time_since_epoch())
                           .count());
 
-    // 3b) 重置 fas-rs 失败计数（v1.0.20）：兑现日志承诺「下次重启 daemon 重置」。
-    // 曾经的坑：计数器只增不减、跨重启 persisted，3 次失败后即使根因已修复
-    // （如 v1.0.19 补写 USER_CONFIG）fas-rs 也永不再自动启动。
-    xdd::fas_reset_retry_count();
-
     // ---- 启动自检：配置与节点不可用时不进入主循环，留可读原因 ----
     {
         auto policies0 = xdd::detect_policies();
@@ -447,46 +428,6 @@ int cmd_daemon() {
     xdd::load_fps_config(fcfg, policies);
     xdd::load_frame_probe_config(fpc);
     xdd::load_thermal_config(tcfg, policies);
-
-    // v1.0.17：fas games.toml 生成（配置桥，始终生成——无二进制时也可供检查）；
-    // 二进制存在才启动 fas-rs；内核 eBPF 不支持时启动超时失败，
-    // 静默回退内置稳帧阶梯。
-    // v1.0.21：开机 /sdcard FUSE 可能未就绪——daemon（post-fs-data 阶段）常早于
-    // 存储挂载完成，此时生成 USER_CONFIG 必然双写失败（2026-10-24 19:41:02 真机
-    // 复现：2 条误导性 WARN + retry_count 误 +1）。首次生成前有界等待存储就绪
-    // （上限 30s，1s 步进，可被停止信号打断；超时则照旧走，失败路径自愈）。
-    if (!xdd::nd_exists("/sdcard/Android")) {
-        xdd::log_line(xdd::LogLevel::Info, "等待 /sdcard 存储就绪（首次 fas 配置生成）…");
-        for (int i = 0; i < 30 && !g_stop_atomic.load(); ++i) {
-            if (xdd::nd_exists("/sdcard/Android")) break;
-            ::sleep(1);
-            // 等待期间持续刷心跳与 tick——否则看门狗 60s 无 tick 会误杀
-            // （v1.0.21 真机实测：存储 81s 才就绪，daemon 被连杀重启 4 次）
-            xdd::write_heartbeat();
-            g_last_tick.store(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now().time_since_epoch())
-                                  .count());
-        }
-    }
-    // v1.0.21：清理上次会话的崩溃残留（stale mode 节点 + 僵尸进程）再继续，
-    // 否则残留节点会让本次启动的 fas_running() 判活失真
-    xdd::fas_reap_and_check();
-    {
-        int fasn = xdd::fas_generate_toml();
-        if (fasn > 0) {
-            xdd::log_line(xdd::LogLevel::Info,
-                          "fas games.toml 已生成（" + std::to_string(fasn) + " 个应用）");
-        }
-        if (xdd::fas_binary_exists()) {
-            // toml 有变且 fas-rs 已在跑（daemon 重启场景）：先停再起，
-            // 让它加载新配置（顺带把频率现场还原后再接管）
-            if (fasn >= 0 && xdd::fas_running()) xdd::fas_stop();
-            xdd::fas_start();
-        } else {
-            xdd::log_line(xdd::LogLevel::Info,
-                          "fas-rs 二进制不存在，帧感知调度未启用（用内置稳帧阶梯）");
-        }
-    }
 
     // 4) 看门狗线程
     {
@@ -521,9 +462,6 @@ int cmd_daemon() {
                               .count());
         long long now = now_ms();
 
-        // ---- v1.0.18 fas-poll：检查 pending 启动是否就绪/超时 ----
-        xdd::fas_poll();
-
         // ---- 暂停 / 全局关闭：还原后待命 ----
         bool paused = (::access(pause_flag.c_str(), F_OK) == 0);
         if (paused || !s.enabled) {
@@ -531,9 +469,9 @@ int cmd_daemon() {
                 xdd::restore_all();
                 xdd::log_line(xdd::LogLevel::Info, paused ? "已暂停，节点已还原" : "全局开关关闭，节点已还原");
             }
-            // v1.0.17：暂停/关闭时停掉 fas-rs（用户要求不干预时频率也归位）
-            if (xdd::fas_running()) xdd::fas_stop();
-            g_fas_managed_prev = false;
+            // 节点已还原，运行时状态同步复位，避免下次启用时继承旧档位/假封顶
+            xdd::fps_reset();
+            xdd::thermal_reset();
             cur_key.clear();
             ::sleep(1);
             continue;
@@ -543,20 +481,14 @@ int cmd_daemon() {
         if (::access(reload_flag.c_str(), F_OK) == 0) {
             std::remove(reload_flag.c_str());
             xdd::load_settings(s);
+            xdd::nd_reset_write_cache();  // 配置变了：重新给不可写节点一次机会
             policies = xdd::detect_policies();
             xdd::load_fps_config(fcfg, policies);
             xdd::load_frame_probe_config(fpc);
+            xdd::frame_probe_reset();  // 配置变了：卸载旧事件并允许重新探测
             xdd::load_thermal_config(tcfg, policies);
-            // v1.0.17：per-app fas 配置可能变了——重新生成 games.toml，
-            // 内容有变且 fas-rs 在跑则重启加载新配置
-            {
-                int n = xdd::fas_generate_toml();
-                if (n >= 0 && xdd::fas_running()) {
-                    xdd::fas_stop();
-                    xdd::fas_start();
-                    xdd::log_line(xdd::LogLevel::Info, "fas games.toml 已更新，fas-rs 已重启");
-                }
-            }
+            xdd::fps_reset();
+            xdd::thermal_reset();
             xdd::log_line(xdd::LogLevel::Info, "配置热重载完成");
             // 配置变了：强制重新落地当前目标
             cur_key.clear();
@@ -564,8 +496,11 @@ int cmd_daemon() {
         }
 
         // ---- 前台识别与场景判定 ----
-        auto fg = xdd::detect_foreground();
+        // 先判亮灭屏：息屏时前台是谁对调度没有意义，直接跳过 /proc 全量扫描。
+        // 这是本模块最频繁的文件操作，夜间息屏可省掉每秒数百次 open。
         bool scr = xdd::screen_on();
+        xdd::ForegroundInfo fg;
+        if (scr) fg = xdd::detect_foreground();
 
         // 加载 per-app 配置：mode 决定档位族，其余键覆盖档位同名参数
         // （如 cpu.min_freq.p0、thread.bind.* 等，实现每应用独立调优）
@@ -579,36 +514,6 @@ int cmd_daemon() {
                 if (xdd::conf_get(perapp.kv, "mode", m)) perapp_mode = m;
             }
         }
-
-        // ---- v1.0.21：僵尸回收 + fas-rs stale 崩溃恢复（假接管根治）----
-        // 必须在托管判定之前：崩溃残留被清掉后，下面的 fas_running() 才会
-        // 诚实返回 false，频率维度及时交还内置阶梯
-        if (xdd::fas_reap_and_check()) {
-            cur_key.clear();  // 频率现场已被还原，强制重新落地
-        }
-
-        // ---- v1.0.18 fas-rs 托管：当前应用是否把频率维度交给帧感知调度 ----
-        // 条件三合一：perapp fas.enable=1 + 二进制在 + fas-rs 在跑。
-        // 配置启用但 fas-rs 没跑（崩溃/启动失败）：尝试拉起（异步非阻塞）；
-        // 拉起失败自动回落我们的阶梯与频率下限。节流与超时由 fas_start/fas_poll 内部处理。
-        bool fas_managed = false;
-        if (has_perapp && xdd::fas_enabled_for(fg.pkg)) {
-            if (xdd::fas_running()) {
-                fas_managed = true;
-            } else if (xdd::fas_binary_exists()) {
-                xdd::fas_start();  // 异步：fork 后立即返回，节点就绪由 fas_poll 确认
-                fas_managed = xdd::fas_running();
-            }
-        }
-        if (fas_managed != g_fas_managed_prev) {
-            // 接管状态变化：强制重新落地（让位/恢复频率下限）
-            cur_key.clear();
-            g_fas_managed_prev = fas_managed;
-            xdd::log_line(xdd::LogLevel::Info,
-                          fas_managed ? "频率维度移交 fas-rs（帧感知接管）"
-                                      : "fas-rs 退出接管，恢复内置频率干预");
-        }
-        xdd::set_freq_defer_fas(fas_managed);
 
         std::string family = xdd::resolve_family(fg.pkg, scr, perapp_mode);
         std::string key = fg.pkg + "|" + family;
@@ -626,6 +531,11 @@ int cmd_daemon() {
         if (key != cur_key && hit >= s.debounce && cooldown_ok) {
             // ---- 执行切换：先还原旧档，再落地新档 ----
             xdd::restore_all();
+            // v1.2.0：档位/温控状态跟应用生命周期绑定。旧版 g_level 是全局
+            // 静态变量，切到新游戏会直接继承上一局的高档位（最长十几秒高频）；
+            // 温控 g_capped 也会在 restore 后残留，导致"显示封顶但节点已还原"。
+            xdd::fps_reset();
+            xdd::thermal_reset();
 
             if (family != "off") {
                 xdd::Profile p;
@@ -682,52 +592,34 @@ int cmd_daemon() {
                                                    " 档位=" + family);
         }
 
-        // ---- 稳帧与温控（仅游戏族；单一温度源） ----
+        // ---- 稳帧与温控（仅游戏族） ----
         if (cur_key.find("|game") != std::string::npos && fcfg.enable) {
-            // v1.1.0：帧探针生命周期——游戏前台挂载、离开即卸载（计数只在
-            // 单一游戏前台时≈游戏帧率；start 内部有 g_gave_up 防重试刷屏）
-            if (fpc.enable && !xdd::frame_probe_active()) xdd::frame_probe_start(fpc);
-            xdd::frame_probe_tick();
-            xdd::TempInfo ti;
-            int temp = xdd::read_max_temp(ti) ? ti.max_milli : 0;
+            // v1.1.0：帧探针生命周期——游戏前台挂载、离开/关闭即卸载
+            if (fpc.enable) {
+                if (!xdd::frame_probe_active()) xdd::frame_probe_start(fpc);
+                xdd::frame_probe_tick();
+            } else if (xdd::frame_probe_active()) {
+                xdd::frame_probe_stop();
+            }
+            // v1.2.0：CPU 封顶只看 SoC 温区（cpu/cpuss/gpuss）。旧版取全机最高温，
+            // 真机 pmih 61℃ 会把 40℃ 的 CPU 封到 2.4/2.65GHz。
+            xdd::TempInfo tsoc;
+            int temp = xdd::read_max_soc_temp(tsoc) ? tsoc.max_milli : 0;
             xdd::fps_tick(fg.pkg, fcfg, &fpc, policies, temp);
             if (s.f_thermal) {
-                xdd::thermal_tick(tcfg, policies, temp);
+                xdd::thermal_tick(tcfg, policies, temp, tsoc.zone);
             }
         } else if (xdd::frame_probe_active()) {
             xdd::frame_probe_stop();
         }
 
-        // ---- v1.0.17 fas 模式仲裁 ----
-        // 温控触发 → powersave（让帧感知调度收敛性能）；
-        // 连续 3 次采样卡顿超标 → performance；否则 balance。
-        // 滞回计数防模式抖动；写节点失败静默（不影响其他干预）。
-        if (fas_managed) {
-            std::string want = "balance";
-            if (xdd::thermal_capped()) {
-                want = "powersave";
-                g_fas_perf_hits = 0;
-            } else {
-                double jank = xdd::fps_last_jank();
-                if (jank >= 0 && jank >= (double)fcfg.jank_threshold) {
-                    if (++g_fas_perf_hits >= 3) want = "performance";
-                } else {
-                    g_fas_perf_hits = 0;
-                }
-            }
-            if (want != g_fas_mode) {
-                xdd::fas_set_mode(want);
-                g_fas_mode = want;
-                xdd::log_line(xdd::LogLevel::Info, "fas 模式 -> " + want);
-            }
-        } else if (!g_fas_mode.empty()) {
-            g_fas_mode.clear();
-        }
-
         // ---- live 快照（按时间窗） ----
         if (now >= next_live) {
-            xdd::TempInfo ti;
-            int temp = xdd::read_max_temp(ti) ? ti.max_milli : 0;
+            xdd::TempInfo tsoc;
+            xdd::TempInfo tall;
+            int soc_temp = xdd::read_max_soc_temp(tsoc) ? tsoc.max_milli : 0;
+            int all_temp = xdd::read_max_temp(tall) ? tall.max_milli : 0;
+            if (soc_temp <= 0) soc_temp = all_temp;  // 温区名不匹配时的兜底
             std::string freqs;
             for (size_t i = 0; i < policies.size(); ++i) {
                 std::string cur;
@@ -737,16 +629,22 @@ int cmd_daemon() {
                 freqs += cur.empty() ? "0" : cur;
             }
             int probe_fps = xdd::frame_probe_last_fps();
+            double real_fps = xdd::fps_last_real_fps();
             xdd::write_live({
                 {"PKG", fg.pkg.empty() ? "—" : fg.pkg},
                 {"FAMILY", family},
-                {"TEMP", std::to_string(temp / 1000)},
+                {"TEMP", std::to_string(soc_temp / 1000)},
+                {"TEMP_ZONE", tsoc.zone.empty() ? "-" : tsoc.zone},
+                {"TEMP_MAX", std::to_string(all_temp / 1000)},
+                {"TEMP_MAX_ZONE", tall.zone.empty() ? "-" : tall.zone},
                 {"FREQ", freqs},
                 {"FPS_LEVEL", std::to_string(xdd::fps_current_level())},
-                {"FPS", probe_fps >= 0 ? std::to_string(probe_fps) : "-"},
+                {"FPS", real_fps >= 0 ? std::to_string((int)(real_fps + 0.5))
+                                      : (probe_fps >= 0 ? std::to_string(probe_fps) : "-")},
+                {"FPS_SRC", real_fps >= 0 ? "gfxinfo" : (probe_fps >= 0 ? "probe" : "-")},
+                {"PROBE_FPS", probe_fps >= 0 ? std::to_string(probe_fps) : "-"},
+                {"JANK", xdd::fps_last_jank() >= 0 ? std::to_string(xdd::fps_last_jank()) : "-"},
                 {"THERM", xdd::thermal_capped() ? "1" : "0"},
-                {"FAS", fas_managed ? "1" : "0"},
-                {"FASMODE", g_fas_mode.empty() ? "-" : g_fas_mode},
             });
             next_live = now + s.live_push_ms;
         }
@@ -758,6 +656,8 @@ int cmd_daemon() {
             idle_rounds = 0;
         }
         int sleep_ms = (idle_rounds >= 5 && s.idle_ms > s.poll_ms) ? s.idle_ms : s.poll_ms;
+        // 息屏时降低轮询频率：只保留亮屏检测（2s），不再为前台识别空转。
+        if (!scr && sleep_ms < 2000) sleep_ms = 2000;
         // 分段睡：每段 ≤1s 并刷新心跳。
         // 监督者按心跳真实年龄判活（阈值 12s），守护循环含 dumpsys（最长 3s）
         // 与空闲退避（最长 5s），不分段最坏间隔约 8s——分段把它压到 1s 级，
@@ -785,8 +685,6 @@ int cmd_daemon() {
     if (xdd::has_intervention()) {
         xdd::restore_all();
     }
-    // v1.0.17：退出时停 fas-rs（防模块停用后它还在调频率）
-    if (xdd::fas_running()) xdd::fas_stop();
     // v1.1.0：卸载帧探针 uprobe 事件（防 daemon 退出后事件残留内核）
     xdd::frame_probe_stop();
     xdd::log_line(xdd::LogLevel::Info, "守护进程退出");

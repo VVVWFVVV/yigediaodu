@@ -201,14 +201,8 @@ fc_dispatch() {
                 n=$(basename "$f" .conf)
                 m=$(cfg_get "$f" mode)
                 [ -n "$m" ] || m="daily"
-                # v1.0.17：帧感知调度接管标记（fas.enable=1 时输出 1）
-                fe=$(cfg_get "$f" fas.enable)
-                case "$fe" in
-                    1|true|True|TRUE|yes|on) fa=1 ;;
-                    *) fa=0 ;;
-                esac
                 [ -n "$LIST" ] && LIST="$LIST,"
-                LIST="$LIST{\"pkg\":\"$(jesc "$n")\",\"mode\":\"$(jesc "$m")\",\"fas\":$fa}"
+                LIST="$LIST{\"pkg\":\"$(jesc "$n")\",\"mode\":\"$(jesc "$m")\"}"
             done
             ok "[$LIST]"
             ;;

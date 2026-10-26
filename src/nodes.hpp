@@ -24,6 +24,9 @@ bool nd_exists(const std::string& path);
 //  SELinux 拦读时 nd_exists 不可信），仍失败记 WARN 返回 false
 bool nd_write(const std::string& path, const std::string& value);
 
+// 清空 nd_write 的权限失败负缓存（配置热重载/daemon 重启时调用）。
+void nd_reset_write_cache();
+
 // 裸写（无回读、无基线、无重试）：仅用于「一次性动作」型节点——
 // 如 /proc/sys/vm/drop_caches（读回恒 0，nd_write 的回读必失败）。
 // 不创建文件（open 无 O_CREAT）；成功返回 true
@@ -40,11 +43,16 @@ struct PolicyInfo {
 // 枚举 cpufreq 策略组：优先 policy* 目录，缺失时回退 cpu*/cpufreq 按 related_cpus 归并
 std::vector<PolicyInfo> detect_policies();
 
-// 最高温度（毫度）与温区名
+// 最高温度（毫度）与温区名（全机，含电池/PMIC——仅用于展示）
 struct TempInfo {
     int max_milli = 0;
     std::string zone;   // 最高温区 type
 };
 bool read_max_temp(TempInfo& out);
+
+// CPU/GPU 相关温区最高温（cpu-*/cpuss-*/gpuss-*），用于 CPU 封顶决策。
+// 电池/充电/PMIC 的温度不能代表 SoC，旧版用全机最高温会把 CPU 误封顶
+// （真机实测 pmih010x_lite_tz=61℃ 时 CPU 才 40℃，48℃ 阈值一开机就触发）。
+bool read_max_soc_temp(TempInfo& out);
 
 }  // namespace xdd

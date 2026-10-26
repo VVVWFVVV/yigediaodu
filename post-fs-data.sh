@@ -12,14 +12,11 @@ mkdir -p "$XDD_HOME/log" "$XDD_HOME/state" "$XDD_HOME/baseline" "$XDD_HOME/tmp" 
 chmod 0700 "$XDD_HOME" 2>/dev/null
 
 # 权限开机自愈：KSU 安装后模块内文件可能全是 0644（v1.0.1 真机实测，
-# customize.sh 的 set_perm 在这台设备没保住），把根目录 .sh、script/*.sh、
-# 守护二进制与捆绑的 fas-rs 统一 chmod 0755。幂等，每次开机执行一次。
-# fas-rs 曾因 0644 无执行位导致 daemon 反复 fork 失败、启动超时刷屏
-# （v1.0.18 真机实测），故一并纳入自愈范围。
+# customize.sh 的 set_perm 在这台设备没保住），把根目录 .sh、script/*.sh
+# 与守护二进制统一 chmod 0755。幂等，每次开机执行一次。
 XDD_BIN="$MODDIR/libs/arm64-v8a/xindiaodud"
-FAS_BIN="$MODDIR/libs/arm64-v8a/fas-rs"
 XDD_SELFHEAL=0
-for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$XDD_BIN" "$FAS_BIN"; do
+for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$XDD_BIN"; do
     if [ -f "$f" ] && [ ! -x "$f" ]; then
         chmod 0755 "$f" 2>/dev/null && XDD_SELFHEAL=1
     fi
@@ -36,6 +33,11 @@ rm -rf "$XDD_HOME/supervisor.lock" 2>/dev/null
 rm -f "$XDD_HOME/supervisor.pid" "$XDD_HOME/daemon.pid" 2>/dev/null
 rm -f "$XDD_HOME/state/reload.flag" 2>/dev/null
 rm -f "$XDD_HOME/tmp"/* 2>/dev/null
+
+# v1.2.0 移除捆绑的帧感知调度后，清理旧版留在本模块运行时目录的产物。
+# 只动本模块自己的路径，不碰 /sdcard 或其它应用的 fas-rs 配置。
+rm -f "$XDD_HOME/state/fas.pid" "$XDD_HOME/state/fas.retry_count" 2>/dev/null
+rm -f "$XDD_HOME/config/fas_games.toml" 2>/dev/null
 
 # 关键：内核节点每次开机都会复位成硬件默认值，上一次开机快照的"基线"
 # 对新的一轮来说已经失效（甚至可能记录的是被本模块改写后的值）。

@@ -98,14 +98,20 @@ while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
 done
 sleep 5
 
+# v1.2.0：清理旧版 fas-rs 的 USER_CONFIG。只删本模块生成的文件，
+# 避免误删用户自己安装的 fas-rs 配置（首行必须是本模块的生成标记）。
+USER_TOML=/sdcard/Android/fas-rs/games.toml
+if [ -f "$USER_TOML" ] && head -n 1 "$USER_TOML" 2>/dev/null | grep -q '由一个调度自动生成'; then
+    rm -f "$USER_TOML" 2>/dev/null
+    rmdir /sdcard/Android/fas-rs 2>/dev/null
+    xdd_log "已清理旧版帧感知调度 USER_CONFIG"
+fi
+
 # 权限自愈（post-fs-data 已做过一次；service 阶段再确保，
 # 覆盖「安装器在 customize 之后又改权限」等时序问题）。
-# 范围：根目录 .sh、script/*.sh、守护二进制、捆绑的 fas-rs。
-# fas-rs 执行位缺失会导致 daemon 反复 fork 失败、启动超时刷屏
-# （v1.0.18 真机实测），故一并纳入自愈。
+# 范围：根目录 .sh、script/*.sh、守护二进制。
 XDD_SELFHEAL=0
-FAS_BIN="$MODDIR/libs/arm64-v8a/fas-rs"
-for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$BIN" "$FAS_BIN"; do
+for f in "$MODDIR"/*.sh "$MODDIR"/script/*.sh "$BIN"; do
     if [ -f "$f" ] && [ ! -x "$f" ]; then
         chmod 0755 "$f" 2>/dev/null && XDD_SELFHEAL=1
     fi
@@ -132,17 +138,15 @@ for p in /proc/[0-9]*; do
     pid="${p#/proc/}"
     [ "$pid" = "$$" ] && continue
     [ "$pid" = "$PPID" ] && continue
-    # 只杀本模块的守护二进制、捆绑的 fas-rs 与旧版监督者：
+    # 只杀本模块的守护二进制与旧版监督者：
     # xindiaodud（守护二进制名，v1.0.16 起模块 id 改为 WY925976742
-    # 但二进制名保留）、fas-rs（v1.0.17 捆绑的帧感知调度——监督者重启时
-    # 杀掉孤儿，让 daemon 用最新 games.toml 重新拉起）、
+    # 但二进制名保留）；
     # 以及旧版/本版监督者（cmdline 同时含模块 id 与 service.sh）：
     # v1.0.19 真机教训——旧匹配只认 v1.0.16 之前的老 id "xindiaodu"，
     # 现行 id "WY925976742" 的老监督者永不被清理，与新监督者并存刷屏。
     # 不能宽匹配 service.sh——其它模块的常驻 service.sh 会被误杀！
     # （NUL 分隔，grep -a 处理）
     if grep -aq "xindiaodud" "$p/cmdline" 2>/dev/null || \
-       grep -aq "fas-rs" "$p/cmdline" 2>/dev/null || \
        { grep -aq "xindiaodu" "$p/cmdline" 2>/dev/null && \
          grep -aq "service\.sh" "$p/cmdline" 2>/dev/null; } || \
        { grep -aq "WY925976742" "$p/cmdline" 2>/dev/null && \

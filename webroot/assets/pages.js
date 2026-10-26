@@ -16,7 +16,6 @@
     var txt = '未开启';
     if (cn === 'ok') { cls = 'fc-cap fc-cap-ok'; txt = '已生效'; }
     else if (cn === 'degraded') { cls = 'fc-cap fc-cap-degraded'; txt = '已降级'; }
-    else if (cn === 'fas') { cls = 'fc-cap fc-cap-ok'; txt = 'fas 接管'; }  // v1.0.17：频率维度交给帧感知调度
     var b = el('span', cls);
     b.innerHTML = '<b>' + esc(name) + '</b> · ' + esc(txt);
     return b;
@@ -85,7 +84,7 @@
       var c4 = el('div', 'fc-card');
       c4.appendChild(el('div', 'fc-card-title', '实时'));
       var grid = el('div', 'fc-kv-grid');
-      [['温度', 'ov-temp'], ['中核簇', 'ov-freq0'], ['大核簇', 'ov-freq1'], ['稳帧档', 'ov-fps'], ['温控', 'ov-therm'], ['帧感知', 'ov-fas']].forEach(function (k) {
+      [['温度', 'ov-temp'], ['中核簇', 'ov-freq0'], ['大核簇', 'ov-freq1'], ['稳帧档', 'ov-fps'], ['温控', 'ov-therm'], ['实时帧率', 'ov-fpsnow']].forEach(function (k) {
         var kv = el('div', 'fc-kv');
         kv.appendChild(el('div', 'fc-kv-label', k[0]));
         var v = el('div', 'fc-kv-value', '…');
@@ -168,18 +167,17 @@
           var f1 = document.getElementById('ov-freq1');
           var fps = document.getElementById('ov-fps');
           var th = document.getElementById('ov-therm');
-          var fas = document.getElementById('ov-fas');
+          var fpsNow = document.getElementById('ov-fpsnow');
           if (t) t.innerHTML = (lv.TEMP || '—') + '<small> ℃</small>';
           var freqs = String(lv.FREQ || '').split(',');
           if (f0) f0.innerHTML = fmtFreq(freqs[0]);
           if (f1) f1.innerHTML = fmtFreq(freqs[1]);
           if (fps) fps.textContent = (lv.FPS_LEVEL || '0') + ' 档';
           if (th) th.textContent = lv.THERM === '1' ? '封顶中' : '正常';
-          // v1.0.17：fas-rs 帧感知调度接管状态（接管中时显示当前模式）
-          if (fas) {
-            fas.textContent = lv.FAS === '1'
-              ? ('接管中' + (lv.FASMODE && lv.FASMODE !== '-' ? ' · ' + lv.FASMODE : ''))
-              : '未接管';
+          if (fpsNow) {
+            var ftxt = (lv.FPS && lv.FPS !== '-') ? (lv.FPS + ' fps') : '—';
+            if (lv.FPS_SRC === 'probe') ftxt += '（探针估）';
+            fpsNow.textContent = ftxt;
           }
 
           // 省电观察滚动记录
@@ -286,8 +284,7 @@
         arr.forEach(function (app) {
           var row = el('div', 'fc-app');
           var name = el('div', 'fc-app-name', app.pkg);
-          name.appendChild(el('small', null, '当前档位：' + app.mode +
-            (app.fas === 1 ? ' · 帧感知接管' : '')));
+          name.appendChild(el('small', null, '当前档位：' + app.mode));
           row.appendChild(name);
 
           var sel = el('select', 'fc-select');

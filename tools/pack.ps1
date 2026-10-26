@@ -72,7 +72,7 @@ Ok "必需文件齐全（$($required.Count) 项）"
 # 「刷入失败」的常见诱因（shebang 带 \r）。仅跳过 libs/ 下的 ELF 二进制
 # （其内容可能合法包含 0x0D 0x0A 序列）。
 Info "检查 CRLF..."
-$excludeTop = @('build-device', 'build-host', 'dist', 'test', 'tools')
+$excludeTop = @('build-device', 'build-host', 'dist', 'test', 'tools', '.github')
 $crlf = @()
 Get-ChildItem $RepoRoot -Recurse -File | ForEach-Object {
     $rel = $_.FullName.Substring($RepoRoot.Length + 1)

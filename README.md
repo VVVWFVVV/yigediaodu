@@ -2,7 +2,7 @@
 
 > KernelSU 日用省电与游戏稳帧双场景调度模块
 
-![version](https://img.shields.io/badge/version-v1.0.16-blue)
+![version](https://img.shields.io/badge/version-v1.2.0-blue)
 ![platform](https://img.shields.io/badge/platform-Android%2015%2B-green)
 ![kernel](https://img.shields.io/badge/kernel-6.6%2B-orange)
 ![root](https://img.shields.io/badge/root-KernelSU-red)
@@ -13,7 +13,7 @@
 
 ### 调度干预
 - **CPU 频率下限**：按档位抬高大小核最低频，写前自动吸附到可用频率表（防内核钳位）
-- **FAS 帧感知稳帧**：捆绑 fas-rs（eBPF 版）——监视实际渲染帧、deadline 前预调频率；按应用托管（`fas.enable`），温控/卡顿自动仲裁模式；不支持 eBPF 时自动回退内置稳帧阶梯
+- **帧监控探针**：捆绑 adreno uprobe 帧计数 + gfxinfo framestats 真实帧率校准——掉帧升档从快、降档双信号确认；符号偏移运行时从 ELF 自动解析，OTA 不失效
 - **cpuset 核心分配**：前台全核、后台收紧（v1/v2 命名自适应）
 - **线程绑核**：前缀匹配 + `sched_setaffinity` + 回读自证（UE4/Unity 全变体覆盖）
 - **IO 预读优化**：游戏档大预读加速地图/资源加载
@@ -123,7 +123,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
 ### 测试
-- **host 测试**（136 项）：模拟设备树，验证配置解析/节点写入/绑核/频率吸附/稳帧阶梯/per-app 覆盖等
+- **host 测试**（169 项）：模拟设备树，验证配置解析/节点写入/绑核/频率吸附/稳帧阶梯/per-app 覆盖等
 - **前端冒烟**（36 项）：Node.js mock DOM，验证 WebUI 四页面渲染与 API 交互
 
 ## 目录结构
@@ -141,7 +141,9 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 │   ├── main.cpp                #   入口（daemon/apply/restore/probe）
 │   ├── engine.cpp              #   调度引擎（档位落地/频率吸附/绑核）
 │   ├── monitor.cpp              #   前台识别（top-app cgroup）
-│   ├── fps.cpp                  #   稳帧阶梯 + 温控封顶
+│   ├── fps.cpp                  #   稳帧阶梯 + 温控封顶 + framestats 真实 FPS
+│   ├── frame_probe.cpp          #   adreno uprobe 帧探针
+│   ├── elf_symbol.cpp           #   ELF 动态符号解析（eglSwapBuffers 偏移）
 │   ├── nodes.cpp               #   节点读写（回读自证/permissive 重试）
 │   ├── config.cpp              #   配置解析
 │   ├── shell.cpp               #   外部命令（dumpsys 等）
@@ -158,7 +160,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 │   └── assets/                 #   bridge.js / api.js / app.js / pages.js
 ├── config/                     # 配置文件
 ├── test/                       # 测试
-│   ├── run_tests.sh            #   host 测试（136 项）
+│   ├── run_tests.sh            #   host 测试（169 项）
 │   ├── mock_tree.sh            #   模拟设备树
 │   └── js_smoke.js             #   前端冒烟（36 项）
 ├── tools/                      # 构建/打包工具
@@ -172,4 +174,4 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 
 ---
 
-**作者**：晚吟 | **版本**：v1.0.16
+**作者**：晚吟 | **版本**：v1.2.0

@@ -30,6 +30,8 @@ bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
 export XD_ROOT="$MOCK"
 export XDD_MODDIR="$REPO"
 export PATH="$MOCK/bin:$PATH"
+# host 用例用秒级睡眠验证稳帧逻辑；跳过生产环境的 60s 启动宽限
+export XDD_TEST_NO_STARTUP_GRACE=1
 
 say "基础子命令"
 chk "--version 输出版本号" sh -c "$BIN --version | grep -q 'xindiaodud 1'"
@@ -59,7 +61,7 @@ say "selfcheck 深度探测"
 chk "selfcheck 报告两个 cpufreq 策略组" sh -c "$BIN --selfcheck | grep -c 'policy' | grep -q '2'"
 chk "selfcheck 报告中核簇 cpus=0-5" sh -c "$BIN --selfcheck | grep -q 'cpus=0-5'"
 chk "selfcheck 报告大核簇 cpus=6-7" sh -c "$BIN --selfcheck | grep -q 'cpus=6-7'"
-chk "selfcheck 读到最高温度" sh -c "$BIN --selfcheck | grep -q '最高温度'"
+chk "selfcheck 读到全机最高温" sh -c "$BIN --selfcheck | grep -q '全机最高温'"
 chk "selfcheck dumpsys 通道可用" sh -c "$BIN --selfcheck | grep -q '外部命令通道可用'"
 chk "selfcheck 整体 PASS" sh -c "$BIN --selfcheck | grep -q '\[selfcheck\] PASS'"
 
@@ -96,6 +98,9 @@ chk "中核最低频写入 1152000（真机合法频率）" sh -c "grep -q 11520
 chk "大核最低频写入 1958400（真机合法频率）" sh -c "grep -q 1958400 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq'"
 chk "前台 top-app cpuset 放开到 0-7（v2 命名 cpus）" sh -c "grep -q '^0-7$' '$XD_ROOT/dev/cpuset/top-app/cpus'"
 chk "IO read_ahead 写入 192" sh -c "grep -q 192 '$XD_ROOT/sys/block/sda/queue/read_ahead_kb'"
+chk "loop 伪设备不被写 read_ahead" sh -c "grep -q '^128$' '$XD_ROOT/sys/block/loop0/queue/read_ahead_kb'"
+chk "ram/zram 伪设备不被写 read_ahead" sh -c "grep -q '^128$' '$XD_ROOT/sys/block/zram0/queue/read_ahead_kb'"
+chk "基线快照不含 loop/ram 伪设备" sh -c "! grep -qE '/(loop|ram|zram)' '$XD_ROOT/data/adb/WY925976742/baseline/nodes.conf'"
 chk "swappiness 写入 20" sh -c "grep -q 20 '$XD_ROOT/proc/sys/vm/swappiness'"
 chk "基线快照已建立" test -f "$XD_ROOT/data/adb/WY925976742/baseline/nodes.conf"
 chk "绑核能力生效（回读自证）" sh -c "grep -q 'threads=ok' '$XD_ROOT/data/adb/WY925976742/state/capability'"
@@ -182,165 +187,6 @@ chk "退出后节点还原" sh -c "grep -q 384000 '$XD_ROOT/sys/devices/system/c
 chk "退出后基线清除" sh -c "[ ! -f '$XD_ROOT/data/adb/WY925976742/baseline/nodes.conf' ]"
 chk "退出后进程真正结束" sh -c "[ ! -d /proc/$DPID ]"
 
-say "fas 帧感知调度集成（v1.0.17）"
-# A/B 对照（host 模式前台恒为 mock /proc 里的 sgame——/proc 扫描优先于
-# dumpsys 桩，所以用 sgame 自身的 fas 开关做对照）：
-#   A. sgame fas.enable=1 + 模拟 /dev/fas_rs/mode 节点
-#      → 频率维度让位 fas-rs（policy0 不被写高）+ fps 能力标 fas + live FAS=1
-#   B. sgame fas.enable=0（临时改配置）+ mode 节点仍在（fas-rs 空闲运行）
-#      → 频率下限正常落地 + live FAS=0
-#      （证明让位条件是「应用托管」而非「fas-rs 进程在跑」）
-# 另验证 games.toml 配置桥：daemon 启动时扫描 perapp 自动生成。
-# v1.0.19 追加：同时双写 fas-rs 的 USER_CONFIG（/sdcard/Android/fas-rs/games.toml）——
-# 该文件缺失/非法会导致 fas-rs 启动即 panic，且它是 fas-rs 的权威配置。
-
-# ---- A：fas 托管（sgame fas.enable=1）----
-bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
-rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"*
-mkdir -p "$XD_ROOT/dev/fas_rs"
-echo balance > "$XD_ROOT/dev/fas_rs/mode"     # 模拟 fas-rs 运行中的模式节点
-# v1.0.21：pid 活性判活的前提——同时模拟活着的 fas-rs 进程与 pid 文件
-mkdir -p "$XD_ROOT/proc/31568"
-echo "fas-rs" > "$XD_ROOT/proc/31568/cmdline"
-echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"
-# 预置一份「脏」USER_CONFIG（v1.0.19）：验证 daemon 启动时把它覆盖为合法配置
-mkdir -p "$XD_ROOT/sdcard/Android/fas-rs"
-echo "# 脏内容：缺全部必填 section，fas-rs 读到会 panic" > "$XD_ROOT/sdcard/Android/fas-rs/games.toml"
-"$BIN" --daemon >/dev/null 2>&1 &
-DPIDF=$!
-sleep 6
-chk "fas 托管时频率下限让位（policy0 保持 384000）" sh -c "grep -q 384000 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
-chk "fas 接管标记（fps=fas）" sh -c "grep -q 'fps=fas' '$XD_ROOT/data/adb/WY925976742/state/capability'"
-chk "live 快照 FAS=1" sh -c "grep -q 'FAS=1' '$XD_ROOT/data/adb/WY925976742/state/live'"
-chk "games.toml 含原神（120fps 候选）" sh -c "grep -q 'com.miHoYo.Yuanshen.*30, 60, 90, 120' '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
-chk "games.toml 含方舟（60fps）" sh -c "grep -q 'com.hypergryph.arknights.*30, 60' '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
-chk "games.toml 含穿越火线" sh -c "grep -q 'com.tencent.tmgp.cf' '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
-chk "games.toml 不含 PUBG（fas 关）" sh -c "! grep -q pubgmhd '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
-chk "games.toml 不含哔哩哔哩（非游戏）" sh -c "! grep -q bili '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml'"
-
-# ---- v1.0.19：fas-rs USER_CONFIG 双写断言 ----
-# 背景：fas-rs Config::new 第一步硬编码读 /sdcard/Android/fas-rs/games.toml，
-# 缺失/非法即 panic（main.rs:66 unwrap）——真机 fas.log 已实证。
-# 该文件同时是 fas-rs 的权威配置（ConfigThread 整体替换 live config），
-# 必须是完整合法内容（config/game_list/四档 margin），不能是空壳。
-chk "USER_CONFIG 已生成（sdcard 路径）" sh -c "[ -s '$XD_ROOT/sdcard/Android/fas-rs/games.toml' ]"
-chk "USER_CONFIG 覆盖预置脏内容" sh -c "! grep -q '脏内容' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
-chk "USER_CONFIG 含托管游戏（穿越火线）" sh -c "grep -q 'com.tencent.tmgp.cf.*30, 60, 90, 120' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
-chk "USER_CONFIG 含 config 节（scene_game_list=false）" sh -c "grep -q 'scene_game_list = false' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
-chk "USER_CONFIG 含四档 margin（balance=3）" sh -c "grep -A1 '\[balance\]' '$XD_ROOT/sdcard/Android/fas-rs/games.toml' | grep -q 'margin = 3'"
-chk "USER_CONFIG 与内部 games.toml 内容一致" sh -c "diff -q '$XD_ROOT/data/adb/WY925976742/config/fas_games.toml' '$XD_ROOT/sdcard/Android/fas-rs/games.toml'"
-
-kill -TERM "$DPIDF" 2>/dev/null
-sleep 2
-chk "fas 托管 daemon 退出清理" sh -c "[ ! -d /proc/$DPIDF ]"
-
-# ---- probe fas（此时 toml 为 4 个托管应用）----
-chk "probe fas 输出托管应用数 4" sh -c "$BIN --probe fas | grep -q '\"managed\":4'"
-chk "probe fas 输出 toml 路径" sh -c "$BIN --probe fas | grep -q 'fas_games.toml'"
-
-# ---- B：非 fas 应用（sgame fas.enable=0 对照，fas-rs 仍空闲运行）----
-bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
-rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"*
-mkdir -p "$XD_ROOT/dev/fas_rs"
-echo balance > "$XD_ROOT/dev/fas_rs/mode"     # fas-rs 仍在跑，但当前应用未托管
-# v1.0.21：同样补活进程 mock——证明让位条件是「应用托管」而非进程在跑
-mkdir -p "$XD_ROOT/proc/31568"
-echo "fas-rs" > "$XD_ROOT/proc/31568/cmdline"
-echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"
-cp "$REPO/config/perapp/com.tencent.tmgp.sgame.conf" "$REPO/config/perapp/com.tencent.tmgp.sgame.conf.testbak"
-cat > "$REPO/config/perapp/com.tencent.tmgp.sgame.conf" <<'EOF'
-mode=game
-fas.enable=0
-EOF
-"$BIN" --daemon >/dev/null 2>&1 &
-DPIDF2=$!
-sleep 6
-chk "非 fas 应用频率下限正常落地（1152000）" sh -c "grep -q 1152000 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
-chk "非 fas 应用 CPU 能力 ok" sh -c "grep -q 'cpu=ok' '$XD_ROOT/data/adb/WY925976742/state/capability'"
-chk "live 快照 FAS=0" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
-kill -TERM "$DPIDF2" 2>/dev/null
-sleep 2
-mv "$REPO/config/perapp/com.tencent.tmgp.sgame.conf.testbak" "$REPO/config/perapp/com.tencent.tmgp.sgame.conf"
-
-say "fas-rs 假接管根治（v1.0.21）"
-# 真机事故（2026-10-24 两次复现）：fas-rs 崩溃后 /dev/fas_rs/mode 节点残留 +
-# state/fas.pid 指着僵尸 31568 → 旧判活（只查节点存在）把已死的 fas-rs 判成
-# 「运行中」→ 主循环把频率维度让位给死人，游戏期间频率干预完全空缺。
-# v1.0.21 起判活 = 节点在 + 进程真活着（pid 文件有效/孤儿领养，僵尸与
-# pid 复用天然排除），并配套 stale 清理（还原基线+清节点+记失败+诊断）。
-
-# ---- 场景 1：节点残留 + pid 指着已死进程（无 /proc 条目）----
-bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
-rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
-mkdir -p "$XD_ROOT/dev/fas_rs"
-echo balance > "$XD_ROOT/dev/fas_rs/mode"                   # 崩溃残留节点
-echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"  # 指着已死 pid
-"$BIN" --daemon >/dev/null 2>&1 &
-DPIDS=$!
-sleep 5
-chk "假接管不再发生（live FAS=0）" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
-chk "频率干预恢复落地（policy0=1152000）" sh -c "grep -q 1152000 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
-chk "崩溃诊断入日志" sh -c "grep -q 'fas-rs 已崩溃' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
-chk "残留 mode 节点被清" sh -c "[ ! -f '$XD_ROOT/dev/fas_rs/mode' ]"
-chk "失败计数记 1" sh -c "[ \"\$(cat '$XD_ROOT/data/adb/WY925976742/state/fas.retry_count' 2>/dev/null)\" = 1 ]"
-kill -TERM "$DPIDS" 2>/dev/null
-sleep 2
-
-# ---- 场景 2：pid 复用——pid 文件指向别的进程（cmdline 不含 fas-rs）----
-bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
-rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
-mkdir -p "$XD_ROOT/dev/fas_rs"
-echo balance > "$XD_ROOT/dev/fas_rs/mode"
-echo 1234 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"   # 1234 是 mock 里的 sgame
-"$BIN" --daemon >/dev/null 2>&1 &
-DPIDR=$!
-sleep 5
-chk "pid 复用不误判（live FAS=0）" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
-kill -TERM "$DPIDR" 2>/dev/null
-sleep 2
-
-# ---- 场景 3：僵尸进程——/proc/<pid>/cmdline 为空（僵尸特征）----
-bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
-rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
-mkdir -p "$XD_ROOT/dev/fas_rs" "$XD_ROOT/proc/31568"
-echo balance > "$XD_ROOT/dev/fas_rs/mode"
-: > "$XD_ROOT/proc/31568/cmdline"                           # 僵尸：cmdline 为空
-echo 31568 > "$XD_ROOT/data/adb/WY925976742/state/fas.pid"
-"$BIN" --daemon >/dev/null 2>&1 &
-DPIDZ=$!
-sleep 5
-chk "僵尸不判活（live FAS=0）" sh -c "grep -q 'FAS=0' '$XD_ROOT/data/adb/WY925976742/state/live'"
-kill -TERM "$DPIDZ" 2>/dev/null
-sleep 2
-
-# ---- 场景 4：孤儿领养——无 pid 文件但 /proc 里有活 fas-rs（daemon 重启场景）----
-bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
-rm -f "$XD_ROOT/data/adb/WY925976742/state/"*
-mkdir -p "$XD_ROOT/sdcard/Android/fas-rs" "$XD_ROOT/dev/fas_rs" "$XD_ROOT/proc/31568"
-echo balance > "$XD_ROOT/dev/fas_rs/mode"
-echo "fas-rs" > "$XD_ROOT/proc/31568/cmdline"               # 活着的 fas-rs（孤儿）
-"$BIN" --daemon >/dev/null 2>&1 &
-DPIDA=$!
-sleep 5
-chk "孤儿领养判活（live FAS=1）" sh -c "grep -q 'FAS=1' '$XD_ROOT/data/adb/WY925976742/state/live'"
-chk "领养后补写 pid 文件" sh -c "grep -q 31568 '$XD_ROOT/data/adb/WY925976742/state/fas.pid'"
-kill -TERM "$DPIDA" 2>/dev/null
-sleep 2
-
-# ---- 场景 5：开机 /sdcard 未就绪——有界等待 + 就绪后补写 ----
-bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
-rm -rf "$XD_ROOT/sdcard"                                    # 模拟 FUSE 未挂载
-"$BIN" --daemon >/dev/null 2>&1 &
-DPIDB=$!
-sleep 3
-chk "存储未就绪时不写 USER_CONFIG" sh -c "[ ! -f '$XD_ROOT/sdcard/Android/fas-rs/games.toml' ]"
-chk "存储未就绪时 daemon 仍存活（等待中）" sh -c "[ -d /proc/$DPIDB ]"
-mkdir -p "$XD_ROOT/sdcard/Android/fas-rs"                   # 模拟存储就绪
-sleep 4
-chk "存储就绪后补写 USER_CONFIG" sh -c "[ -s '$XD_ROOT/sdcard/Android/fas-rs/games.toml' ]"
-kill -TERM "$DPIDB" 2>/dev/null
-sleep 2
-
 say "帧监控探针（v1.1.0 adreno uprobe）"
 # 真机路线（2026-10-25 实测跑通 60.67fps）：tracefs uprobe 挂
 # /vendor/lib64/libEGL_adreno.so:0x9ed0（eglSwapBuffers）+ uprobe_profile
@@ -369,7 +215,8 @@ echo "0.50" > "$XD_ROOT/state/jank"
 done ) &
 WRITER=$!
 sleep 10
-chk "live 上报实时 FPS（30 上下）" sh -c "grep -qE 'FPS=(1[5-9]|2[0-9]|3[0-9]|4[0-5])' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "live 上报真实 FPS（framestats=60）" sh -c "grep -qE '^FPS=(5[5-9]|6[0-5])$' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "live 上报探针原始 FPS（30 上下）" sh -c "grep -qE '^PROBE_FPS=(1[5-9]|2[0-9]|3[0-9]|4[0-5])$' '$XD_ROOT/data/adb/WY925976742/state/live'"
 chk "低 FPS 触发升档（FPS_LEVEL>=1）" sh -c "grep -qE 'FPS_LEVEL=[1-9]' '$XD_ROOT/data/adb/WY925976742/state/live'"
 chk "升档写阶梯值（1152000 或 1785600）" sh -c "grep -qE '1152000|1785600' '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'"
 chk "升档日志带帧率判据（而非卡顿率）" sh -c "grep -q '实时帧率' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
@@ -387,7 +234,7 @@ rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/bas
 echo "  /vendor/lib64/libEGL_adreno.so xdd_frame   500" > "$TR/uprobe_profile"
 "$BIN" --daemon >/dev/null 2>&1 &
 DPIDP2=$!
-sleep 11
+sleep 26
 chk "无计数自动降级（frame=degraded）" sh -c "grep -q 'frame=degraded' '$XD_ROOT/data/adb/WY925976742/state/capability'"
 chk "降级日志提示符号失效" sh -c "grep -q '符号偏移可能已失效' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
 chk "探针已停用" sh -c "grep -q '帧探针已停止' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
@@ -408,10 +255,38 @@ sed -i 's/^fps.frame_probe=1/fps.frame_probe=0/' "$REPO/config/settings.conf"
 DPIDQ=$!
 sleep 4
 chk "关闭时不注册事件" sh -c "[ ! -s '$TR/uprobe_events' ]"
-chk "关闭时 live FPS 为 -" sh -c "grep -q 'FPS=-' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "关闭时探针 FPS 为 -" sh -c "grep -q '^PROBE_FPS=-$' '$XD_ROOT/data/adb/WY925976742/state/live'"
 kill -TERM "$DPIDQ" 2>/dev/null
 sleep 2
 mv "$REPO/config/settings.conf.testbak" "$REPO/config/settings.conf"
+
+say "温控取温口径（v1.2.0：只用 CPU/GPU 温区）"
+# 场景 A：PMIC/电池 61℃，CPU 42-45℃ → 不应触发 CPU 封顶
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+echo 61000 > "$XD_ROOT/sys/class/thermal/thermal_zone6/temp"   # battery
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDT1=$!
+sleep 6
+chk "PMIC 61℃ 不触发 CPU 封顶（THERM=0）" sh -c "grep -q '^THERM=0$' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "面板仍展示全机最高温 61" sh -c "grep -q '^TEMP_MAX=61$' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "policy0 上限保持 3532800" sh -c "grep -q 3532800 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'"
+kill -TERM "$DPIDT1" 2>/dev/null
+sleep 2
+
+# 场景 B：CPU 49℃ → 触发封顶，日志带 zone
+bash "$REPO/test/mock_tree.sh" "$MOCK" >/dev/null
+rm -f "$XD_ROOT/data/adb/WY925976742/state/"* "$XD_ROOT/data/adb/WY925976742/baseline/"* "$XD_ROOT/data/adb/WY925976742/log/daemon.log"
+echo 81000 > "$XD_ROOT/sys/class/thermal/thermal_zone0/temp"   # cpu-0-0
+"$BIN" --daemon >/dev/null 2>&1 &
+DPIDT2=$!
+sleep 6
+chk "CPU 81℃ 触发封顶（THERM=1）" sh -c "grep -q '^THERM=1$' '$XD_ROOT/data/adb/WY925976742/state/live'"
+chk "封顶写入 policy0=2400000" sh -c "grep -q 2400000 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'"
+chk "封顶日志带 zone=cpu-0-0" sh -c "grep -q 'zone=cpu-0-0' '$XD_ROOT/data/adb/WY925976742/log/daemon.log'"
+kill -TERM "$DPIDT2" 2>/dev/null
+sleep 2
+chk "退出后 max_freq 还原 3532800" sh -c "grep -q 3532800 '$XD_ROOT/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'"
 
 say "单实例保护（flock）"
 # 第一个 daemon 持锁运行，第二个实例必须直接退出（双 daemon 会互相覆盖节点）
@@ -485,18 +360,6 @@ DPID9=$!
 sleep 2
 chk "锁释放后新实例可正常持锁运行" sh -c "[ -d /proc/$DPID9 ]"
 kill -TERM "$DPID9" 2>/dev/null
-sleep 1
-
-# ---- v1.0.20：fas.retry_count 启动重置 ----
-# 曾经的坑：计数器只增不减、跨重启 persisted，3 次失败后即使根因已修复
-# （如 v1.0.19 补写 USER_CONFIG）fas-rs 也永不再自动启动——日志却一直
-# 承诺「下次重启 daemon 重置」。现在 daemon 持锁后立即重置。
-echo 3 > "$XD_ROOT/data/adb/WY925976742/state/fas.retry_count"
-"$BIN" --daemon >/dev/null 2>&1 &
-DPID10=$!
-sleep 2
-chk "daemon 启动重置 fas.retry_count 为 0" sh -c "grep -q '^0$' '$XD_ROOT/data/adb/WY925976742/state/fas.retry_count'"
-kill -TERM "$DPID10" 2>/dev/null
 sleep 1
 
 say "fcctl 控制入口（JSON 信封 + 看门狗）"

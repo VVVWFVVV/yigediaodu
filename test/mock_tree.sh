@@ -138,6 +138,11 @@ for dev in sda sdb; do
     echo 128 > "$SYS/block/$dev/queue/read_ahead_kb"
     echo 128 > "$SYS/block/$dev/queue/nr_requests"
 done
+# v1.2.0：真实设备有大量 loop/ram/zram 伪设备，read_ahead 不应写它们
+for dev in loop0 ram0 zram0; do
+    mkdir -p "$SYS/block/$dev/queue"
+    echo 128 > "$SYS/block/$dev/queue/read_ahead_kb"
+done
 
 # ---------------- /proc/sys/vm ----------------
 mkdir -p "$PROC/sys/vm"
@@ -208,6 +213,21 @@ Number Slow UI thread: 3
 Number Slow bitmap uploads: 1
 Number Slow issue draw commands: 0
 FRAMES
+        # v1.2.0：framestats 段用于验证真实 FPS 解析（60 帧 × 16.666ms ≈ 60fps）
+        case "$*" in
+            *framestats*)
+                echo "---PROFILEDATA---"
+                echo "Flags,IntendedVsync,FrameCompleted"
+                t=1000000000
+                i=0
+                while [ "$i" -lt 60 ]; do
+                    echo "0,$t,$t"
+                    t=$((t + 16666666))
+                    i=$((i + 1))
+                done
+                echo "---PROFILEDATA---"
+                ;;
+        esac
         ;;
 esac
 exit 0
@@ -217,9 +237,6 @@ chmod +x "$BIN/dumpsys"
 # 测试控制文件与运行时目录骨架
 mkdir -p "$ROOT/state" "$ROOT/data/adb/WY925976742/log" "$ROOT/data/adb/WY925976742/state" \
          "$ROOT/data/adb/WY925976742/baseline" "$ROOT/data/adb/WY925976742/tmp"
-# /sdcard 存储（v1.0.21：daemon 启动时有界等待其就绪——mock 默认就绪；
-# 「未就绪时等待、就绪后补写」的行为由 run_tests.sh 场景 5 显式移除后验证）
-mkdir -p "$ROOT/sdcard/Android/fas-rs"
 echo "com.tencent.tmgp.sgame" > "$ROOT/state/fg"
 echo "on" > "$ROOT/state/screen"
 

@@ -14,6 +14,7 @@ struct FpsConfig {
     int sample_ms = 2000;
     int jank_threshold = 5;  // 卡顿率阈值（百分比）
     int hold_ms = 5000;      // 阶梯保持窗口（滞回）
+    int startup_grace_ms = 60000;  // 游戏启动宽限：期间不因 jank/FPS 升档
 };
 
 // 温控配置（settings.conf 中 thermal.* 键）
@@ -38,15 +39,25 @@ bool load_thermal_config(ThermalConfig& out, const std::vector<PolicyInfo>& poli
 void fps_tick(const std::string& pkg, const FpsConfig& cfg, const FrameProbeConfig* fpc,
               const std::vector<PolicyInfo>& policies, int temp_milli);
 
-// 温控阈值封顶（只降不升、滞回恢复）；返回当前是否处于封顶状态
-bool thermal_tick(const ThermalConfig& cfg, const std::vector<PolicyInfo>& policies, int temp_milli);
+// 温控阈值封顶（只降不升、滞回恢复）；返回当前是否处于封顶状态。
+// temp_milli 必须是 CPU/GPU 温区（read_max_soc_temp），zone 仅用于日志。
+bool thermal_tick(const ThermalConfig& cfg, const std::vector<PolicyInfo>& policies,
+                  int temp_milli, const std::string& zone = "");
 
 // 当前稳帧档位 / 温控封顶状态（live 快照用）
 int fps_current_level();
 bool thermal_capped();
 
-// 最近一次卡顿率（百分比，-1=无数据）；fas 模式仲裁用
+// 切换应用/场景时复位运行时状态（档位、卡顿率、低帧计数、温控封顶标记）。
+// 只清内存状态，不写节点——节点还原由 restore_all() 负责。
+void fps_reset();
+void thermal_reset();
+
+// 最近一次卡顿率（百分比，-1=无数据）
 double fps_last_jank();
+
+// 最近一次 gfxinfo framestats 算出的应用真实 FPS（-1=无数据）
+double fps_last_real_fps();
 
 // 当前稳帧阶梯摘要（诊断/测试用）："p0:384000,1152000|p1:1017600,..."
 std::string fps_steps_summary();

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <stdlib.h>
 #include <unistd.h>
@@ -73,6 +74,16 @@ bool sim_read_deny(const std::string& real) {
 // 文件操作覆盖 errno，也避免 Mismatch 路径打出误导性的 "0 (Success)"
 int g_last_open_errno = 0;
 
+// 权限类失败负缓存（v1.2.0）：设备上存在驱动级只读节点（如 sm8750 的
+// GPU min/max_freq 0444）和 SELinux 永久拒绝的路径。旧实现每次切档都重试
+// 一次并翻瞬时 permissive，既刷日志又制造无意义的 enforcing→permissive 窗口。
+// 本会话内记住已确认不可写的真实路径，后续直接失败；reload/重启时清空。
+std::set<std::string> g_write_denied;
+
+bool perm_denied_errno(int e) {
+    return e == EACCES || e == EPERM || e == EROFS;
+}
+
 WriteErr try_write_node(const std::string& real, const std::string& value) {
     if (sim_deny_active(real)) {
         g_last_open_errno = EACCES;
@@ -119,12 +130,15 @@ bool read_enforce(std::string& out) {
 
 }  // namespace
 
+// 清空权限失败负缓存：配置热重载或 daemon 重启后重新给节点一次机会
+// （用户可能修了 SELinux 策略/换了设备，永久缓存会误伤）。
+void nd_reset_write_cache() { g_write_denied.clear(); }
+
 // 裸写（无回读/基线/重试）：一次性动作型节点专用。
 // 用途：/proc/sys/vm/drop_caches（读回恒 0）这类「写即触发」节点——
 // 走 nd_write 会因回读不一致而误判失败。同 set_enforce_raw：
 // open 无 O_CREAT（节点不存在必须失败，绝不创建文件）。
-bool raw_write_node(const std::string& path, const std::string& value) {
-    const std::string real = nd_path(path);
+bool raw_write_node(const std::string& path, const std::string& value) {    const std::string real = nd_path(path);
     int fd = ::open(real.c_str(), O_WRONLY);
     if (fd < 0) return false;
     const std::string data = value + "\n";
@@ -156,6 +170,16 @@ bool nd_exists(const std::string& path) {
 bool nd_write(const std::string& path, const std::string& value) {
     const std::string real = nd_path(path);
 
+    // 已确认不可写的节点：本会话不再重试（避免每次切档都翻一次 permissive）
+    if (g_write_denied.count(real)) return false;
+
+    // 同值不写：sysfs 写入会触发 governor/驱动侧重新计算，同值重复写没有收益；
+    // 读不到当前值（cpuset 被 SELinux 拦读等）时保持旧行为，继续尝试写。
+    {
+        std::string cur;
+        if (nd_read(path, cur) && cur == value) return true;
+    }
+
     // Mismatch：重试 3 次（v1.0.12 真机：还原 policy6 频率时系统短暂锁住
     // 节点，单次重试不足以覆盖窗口；每次间隔 10ms 让系统喘口气）
     for (int attempt = 1; attempt <= 4; ++attempt) {
@@ -170,12 +194,20 @@ bool nd_write(const std::string& path, const std::string& value) {
             if (g_last_open_errno == ENOENT) {
                 return false;
             }
+            // EROFS：文件系统只读（驱动级无 store 回调也会表现成 EACCES，
+            // 由下面的 permissive 分支兜底判断），翻 SELinux 无意义。
+            if (g_last_open_errno == EROFS) {
+                g_write_denied.insert(real);
+                log_line(LogLevel::Warn, "nd_write 节点只读，本会话跳过: " + path);
+                return false;
+            }
             // 打不开：SELinux enforcing 时走一次瞬时 permissive 重试。
             // 关键：不能用 nd_exists(path) 做前置判断——SELinux 拦读时
             // nd_exists 本身不可信（v1.0.1 真机：ksu 域读 cgroup 被拦，
             // 存在性探测误判 false，permissive 从未触发，cpuset 直接降级）。
             // 只要 enforce 可读且原值非 0，就试一次；代价仅是节点真的
             // 不存在时多一次毫秒级 permissive 窗口，无副作用。
+            WriteErr retry_err = WriteErr::Open;
             std::string orig;
             if (read_enforce(orig) && orig != "0") {
                 // 翻 0 后必须读回确认真的进了 permissive（v1.0.4 真机：
@@ -183,6 +215,7 @@ bool nd_write(const std::string& path, const std::string& value) {
                 std::string chk;
                 if (set_enforce_raw("0") && read_enforce(chk) && chk == "0") {
                     WriteErr e2 = try_write_node(real, value);
+                    retry_err = e2;
                     // 恢复原值，并读回确认恢复成功
                     std::string back;
                     bool restored = set_enforce_raw(orig) &&
@@ -202,6 +235,11 @@ bool nd_write(const std::string& path, const std::string& value) {
                              std::string("nd_write enforce 翻 0 未生效（读回=") +
                                  (chk.empty() ? "读不到" : chk) + "），放弃 permissive 重试: " + path);
                 }
+            }
+            // 确认是权限/只读类失败：记入负缓存，本会话不再尝试。
+            // retry_err==Mismatch 说明 permissive 后能写、只是回读不符，不缓存。
+            if (retry_err == WriteErr::Open && perm_denied_errno(g_last_open_errno)) {
+                g_write_denied.insert(real);
             }
             log_line(LogLevel::Warn, "nd_write 打不开节点: " + path + "（errno " + last_open_errno_text() + "）");
             return false;
@@ -305,6 +343,38 @@ bool read_max_temp(TempInfo& out) {
         if (!any || milli > out.max_milli) {
             out.max_milli = milli;
             nd_read(dir + "/type", out.zone);
+            any = true;
+        }
+    }
+    ::closedir(d);
+    return any;
+}
+
+bool read_max_soc_temp(TempInfo& out) {
+    const std::string base = "/sys/class/thermal";
+    DIR* d = ::opendir(nd_path(base).c_str());
+    if (!d) return false;
+
+    bool any = false;
+    struct dirent* e;
+    while ((e = ::readdir(d)) != nullptr) {
+        std::string name = e->d_name;
+        if (name.rfind("thermal_zone", 0) != 0) continue;
+        std::string dir = base + "/" + name;
+        std::string type;
+        if (!nd_read(dir + "/type", type)) continue;
+        // 只看 SoC 侧温区：cpu-0-4-1 / cpuss-0-1 / gpuss-0-7。
+        // 排除 battery / pmih / pm8550 / usb / shell / mdmss / camera 等。
+        if (type.rfind("cpu", 0) != 0 && type.rfind("cpuss", 0) != 0 &&
+            type.rfind("gpu", 0) != 0) {
+            continue;
+        }
+        long long t = 0;
+        if (!nd_read_int(dir + "/temp", t)) continue;
+        int milli = static_cast<int>(t);
+        if (!any || milli > out.max_milli) {
+            out.max_milli = milli;
+            out.zone = type;
             any = true;
         }
     }

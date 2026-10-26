@@ -182,7 +182,10 @@ ForegroundInfo detect_foreground() {
 }
 
 bool screen_on() {
-    if (throttled(g_last_ds_power, 5000)) return g_screen_cached;
+    // 亮屏时 5s 查一次即可；息屏时缩短到 2s，保证亮屏后尽快恢复前台识别。
+    // 息屏期间主循环不扫 /proc，这里的一次 dumpsys 是唯一周期开销。
+    int interval = g_screen_cached ? 5000 : 2000;
+    if (throttled(g_last_ds_power, interval)) return g_screen_cached;
     auto sr = shell_run("dumpsys power", 3000);
     if (sr.timed_out) return g_screen_cached;  // 超时沿用上次结论，不猜测
     g_screen_cached = (sr.out.find("mWakefulness=Awake") != std::string::npos);

@@ -76,21 +76,7 @@ long long snap_to_available_freq(const std::string& dir, long long target,
 // 否则扫描 /sys/class/kgsl/*/devfreq 取第一个含可用频率表的；找不到返回空串。
 const std::string& gpu_devfreq_dir();
 
-// 基线快照（只读记录当前值，不写入）：供 fas-rs 接管频率前快照现场
-// （同一节点只记一次；读不到当前值不记）
+// 基线快照（只读记录当前值，不写入）：首次写某节点前记录当前值。
 void baseline_snapshot_node(const std::string& path);
-
-// 按路径后缀从基线还原节点（如 "scaling_min_freq" 匹配所有策略组）：
-// 返回成功写回的节点数。供 fas-rs 停止后还原频率现场。
-int baseline_restore_matching(const std::string& suffix);
-
-// 频率下限让位开关（v1.0.17 fas 集成）：置 true 时 apply_profile 跳过
-// cpu.min_freq.pN 的写入（fas-rs 正在管理当前应用的频率维度）。
-// 由 daemon 在每次落地档位前按「当前应用 fas.enable 且 fas-rs 在跑」设置。
-void set_freq_defer_fas(bool defer);
-
-// 读取当前让位状态（fps_tick 的阶梯让位共用同一状态——
-// 让位条件是「当前应用交给 fas-rs 管频率」，不是「fas-rs 进程在跑」）
-bool freq_defer_fas();
 
 }  // namespace xdd

@@ -82,7 +82,10 @@ function Find-Ndk {
 # device 侧始终走 CMake + NDK（唯一权威构建）。
 function Invoke-HostBuild {
     Info "host 构建（WSL2 Ubuntu）..."
-    $wslPath = '/mnt/d/新调度'
+    # 仓库可能被移动/克隆到其它目录：用 wslpath 从当前仓库路径反推，
+    # 不再硬编码 /mnt/d/新调度。
+    $wslPath = (& wsl -d Ubuntu -- wslpath -a "$RepoRoot" 2>$null | Out-String).Trim()
+    if (-not $wslPath) { $wslPath = '/mnt/d/新调度' }
     $haveCmake = & wsl -d Ubuntu -- bash -lc "command -v cmake >/dev/null 2>&1 && echo yes || echo no"
     if ("$haveCmake".Trim() -eq "yes") {
         Info "检测到 WSL cmake，走 CMake 构建"
@@ -148,59 +151,6 @@ function Invoke-DeviceBuild {
     Ok "device 构建完成: libs\arm64-v8a\xindiaodud"
 }
 
-# ---------------- fas-rs 集成（帧感知调度，v1.0.17） ----------------
-# 下载 fas-rs v2.8.0 eBPF 版二进制到 libs/arm64-v8a/fas-rs。
-# eBPF 版无需 inline hook 注入（无反作弊检测风险），内核 eBPF 支持差时
-# 守护进程自动回退到我们自己的稳帧阶梯。
-# 下载走 gh CLI（自带代理处理）；gh 不可用时退 Invoke-WebRequest（先代理后直连）。
-function Get-FasRsBinary {
-    $out = Join-Path $RepoRoot 'libs\arm64-v8a'
-    New-Item -ItemType Directory -Force -Path $out | Out-Null
-    $target = Join-Path $out 'fas-rs'
-    $dlDir = Join-Path $env:TEMP 'fas-dl'
-    $zip = Join-Path $dlDir 'fas-rs-ebpf.zip'
-
-    Info "下载 fas-rs eBPF 版（v2.8.0）..."
-    $gh = "C:\Program Files\GitHub CLI\gh.exe"
-    $downloaded = $false
-    if (Test-Path $gh) {
-        & $gh release download v2.8.0 --repo shadow3aaa/fas-rs --pattern "fas-rs-ebpf.zip" --dir "$dlDir" --clobber 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $zip)) { $downloaded = $true }
-    }
-    if (-not $downloaded) {
-        $url = "https://github.com/shadow3aaa/fas-rs/releases/download/v2.8.0/fas-rs-ebpf.zip"
-        New-Item -ItemType Directory -Force -Path $dlDir | Out-Null
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $zip -Proxy "http://127.0.0.1:7890" -TimeoutSec 60
-            $downloaded = $true
-        } catch {
-            try {
-                Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 60
-                $downloaded = $true
-            } catch {
-                Fail "fas-rs 下载失败（gh/代理/直连均失败）：$_`n请手动下载 $url`n解出 fas-rs 放到 libs\arm64-v8a\fas-rs 后重试"
-            }
-        }
-    }
-
-    $extract = Join-Path $env:TEMP 'fas-extract'
-    if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-    Expand-Archive -Path $zip -DestinationPath $extract -Force
-    $bin = Join-Path $extract 'fas-rs'
-    if (-not (Test-Path $bin)) { Fail "fas-rs zip 内未找到二进制（解出于 $extract）" }
-
-    Copy-Item $bin $target -Force
-    # 校验 ELF aarch64（魔数 + e_machine=0xB7）
-    $bytes = [IO.File]::ReadAllBytes($target)
-    if ($bytes.Length -lt 20 -or $bytes[0] -ne 0x7F -or $bytes[1] -ne 0x45 -or $bytes[2] -ne 0x4C -or $bytes[3] -ne 0x46) {
-        Fail "fas-rs 不是 ELF 文件"
-    }
-    if (-not ($bytes[18] -eq 0xB7 -and $bytes[19] -eq 0x00)) {
-        Fail "fas-rs 不是 AArch64 架构（e_machine=$($bytes[18]),$($bytes[19])）"
-    }
-    Ok "fas-rs 就绪: libs\arm64-v8a\fas-rs（$([math]::Round($bytes.Length/1024)) KB）"
-}
-
 if (-not $DeviceOnly) { Invoke-HostBuild }
-if (-not $HostOnly)  { Get-FasRsBinary; Invoke-DeviceBuild }
+if (-not $HostOnly)  { Invoke-DeviceBuild }
 Ok "全部完成"

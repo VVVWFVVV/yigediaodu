@@ -126,17 +126,10 @@ for f in service.sh post-fs-data.sh action.sh uninstall.sh customize.sh; do
 done
 # 真机教训（一加平板/KSU）：set_perm 在该环境可能不生效，安装后文件全是
 # 0644。这里在 set_perm 之后再用 chmod 直设一遍做双保险，并硬校验二进制。
-# fas-rs（捆绑的帧感知调度）同样需要执行位：缺 x 会导致 daemon 反复 fork
-# 失败、启动超时刷屏（v1.0.18 真机实测），故一并纳入。
-FAS_BIN="$MODPATH/libs/arm64-v8a/fas-rs"
-for f in "$MODPATH"/*.sh "$MODPATH"/script/*.sh "$XDD_BIN" "$FAS_BIN"; do
+for f in "$MODPATH"/*.sh "$MODPATH"/script/*.sh "$XDD_BIN"; do
     [ -f "$f" ] && chmod 0755 "$f" 2>/dev/null
 done
 [ -x "$XDD_BIN" ] || abort "! 守护二进制执行位丢失（chmod 后仍不可执行）"
-# fas-rs 为可选组件：存在则确保可执行，缺失或仍不可执行时仅告警不中断安装
-if [ -f "$FAS_BIN" ] && [ ! -x "$FAS_BIN" ]; then
-    ui_print " ! fas-rs 执行位丢失，帧感知调度将不可用（不影响其他功能）"
-fi
 
 # WebUI：KernelSU / APatch 由内核侧静态服务器读取本目录
 if [ -d "$MODPATH/webroot" ]; then

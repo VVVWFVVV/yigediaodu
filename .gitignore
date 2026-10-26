@@ -19,4 +19,3 @@ libs/arm64-v8a/xindiaodud
 # 临时文件
 *.testbak
 *.tmp
-libs/arm64-v8a/fas-rs

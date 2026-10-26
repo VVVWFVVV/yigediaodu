@@ -1,5 +1,7 @@
 # 设备知识树 · 一加平板 2 Pro（OPD2413）
 
+> **v1.2.0 变更（2026-10-26）**：fas-rs 已彻底移除（源码、二进制、配置键、构建下载、测试、WebUI 均删除）。本文 8.2/8.3/9 节中的 fas-rs 记录保留为历史证据，不再代表当前实现；当前帧信号 = adreno uprobe 快信号 + gfxinfo framestats 真实 FPS。
+
 - 序列号：`6d52ba83`
 - 采集日期：2026-10-25（adb 只读 + su root；当晚追加帧监控路线实测）
 - 用途：「一个调度」模块在这台设备上的权威设备数据源。开发/排障先查本文件，避免重复探索。
@@ -20,7 +22,7 @@ flowchart TD
     KER --> BAD["perf-uprobe+BPF 路线：损坏"]
     KER --> EGLB["/system/lib64 图形栈 uprobe：EBUSY 被占"]
     KER --> ADR["vendor libEGL_adreno uprobe：可用（帧监控路线）"]
-    GPU --> GPUP["GPU min/max_freq 0444 只读 → 能力降级"]
+    GPU --> GPUP["GPU min_freq 可写（2026-10-26 复测，旧记录 0444 已过时）"]
 ```
 
 ## 1. 身份层
@@ -79,8 +81,9 @@ flowchart TD
 ```
 
 对本项目的意义：
-- daemon 写 GPU 频率的路径 `/sys/class/kgsl/kgsl-3d0/devfreq/{min,max}_freq` 在此设备均为 **0444 只读**（2026-10-25 `ls -la` 实测）——sysfs 属性无 store 回调即驱动级阉割：root/CAP_DAC_OVERRIDE 也写不了、chmod 无效、瞬时 permissive 无效（00:08 日志的 Permission denied 正是此因，**不是 SELinux 问题**）→ `gpu` 能力降级，game 档 GPU 维度实际不干预
-- 同目录 `governor` 可写但无干预意义；GPU 频率完全交给 Adreno TZ（温控驱动）自治，本项目不要指望 GPU 频率维度
+- **2026-10-26 v1.2.0 复测更新**：`min_freq` 权限为 `rw-rw-r--`、`max_freq` 为 `rw-r--r--`，root 写入 `342000000` 成功，`gpu` 能力不再降级，game 档 GPU 下限实际生效。本文旧记录「0444 只读」只代表 2026-10-25 当时状态（可能被系统/热控策略改写），排障时以 `ls -l` 实时结果为准。
+- daemon 写 GPU 频率的路径 `/sys/class/kgsl/kgsl-3d0/devfreq/{min,max}_freq`；若某次开机又变回 0444，会走一次瞬时 permissive 后降级，v1.2.0 起该路径会进入负缓存，不会每次切档重复翻。
+- 同目录 `governor` 可写但无干预意义；GPU 频率仍主要交给 Adreno TZ（温控驱动）自治。
 
 ## 4. 温控树
 
@@ -92,9 +95,9 @@ flowchart TD
 - 36 个 cooling_device：`cpufreq-cpu0`、`cpu-hotplug0/2/3`、`pause-cpu0-7`、`thermal-pause-*`、`ufs`、`display-fps`、`ddr-cdev`、`gpu-dump-skip-cdev`、`cpu-cluster0/1`、`kgsl`
 
 对本项目的意义：
-- `thermal_tick` 取**全部 zone 的最高温**（nodes.cpp `read_max_temp`，含电池/PMIC 区——`TEMP=61` 完全可能是电池区而非 CPU）
-- live `TEMP` = 最高 zone 毫秒值 / 1000（℃）；`THERM=1` 时 daemon 写各 policy 的 `scaling_max_freq` 封顶（采集时 live 正是 THERM=1/TEMP=61）
-- 封顶/恢复阈值走配置 `thermal.cap_temp` / `thermal.recover_temp`
+- **v1.2.0 起**：`thermal_tick` 只用 CPU/GPU 温区（`cpu-*`/`cpuss-*`/`gpuss-*`）的最高温做封顶判据；全机最高温（含 `pmih010x_lite_tz`/电池）只在 live `TEMP_MAX` 与面板展示。旧版取全部 zone 最高温，实测 PMIC 60.5℃ 时 CPU 才 41℃，48℃ 阈值一开机就误封顶。
+- live `TEMP` = SoC 温区最高温（℃），`TEMP_ZONE` 为触发温区，`TEMP_MAX`/`TEMP_MAX_ZONE` 为全机最高温；`THERM=1` 时写各 policy 的 `scaling_max_freq` 封顶。
+- 默认阈值已按 CPU 口径调整为 `thermal.cap_temp=80000` / `thermal.recover_temp=74000`（80℃/74℃，毫度）；重载游戏 70-90℃ 时按需封顶。
 
 ## 5. cgroup / cpuset 树
 
@@ -211,13 +214,13 @@ echo -:fm_probe > /sys/kernel/tracing/uprobe_events
 
 ## 9. 本项目运行态（2026-10-25 19:xx 采集）
 
-- 模块 v1.0.20（versionCode 21），已启用
+- 模块 v1.0.20（versionCode 21），已启用（**以下为 2026-10-25 历史快照**）
 - daemon pid 11906（STAT S 健康），supervisor 3787 之子进程
-- state/ 文件：capability、current、fas.pid、fas.retry_count（=0）、heartbeat、live
-- live 快照：`PKG=me.weishu.kernelsu`、`FAMILY=daily`、`TEMP=61`（℃）、`FREQ=2227200,1017600`、`FPS_LEVEL=0`、`THERM=1`、`FAS=0`、`FASMODE=-`
+- state/ 文件（v1.2.0 当前）：capability、current、heartbeat、live；旧版 `fas.pid`/`fas.retry_count` 已由 post-fs-data 清理
+- live 快照（历史 v1.1.0）：`PKG=me.weishu.kernelsu`、`FAMILY=daily`、`TEMP=61`（℃）、`FREQ=2227200,1017600`、`FPS_LEVEL=0`、`THERM=1`、`FAS=0`、`FASMODE=-`。v1.2.0 已删除 FAS/FASMODE，新增 `TEMP_ZONE`/`TEMP_MAX`/`TEMP_MAX_ZONE`/`PROBE_FPS`/`JANK`
 - capability 实况（daily 档）：cpu=off cpuset=ok threads=off gpu=off io=ok mem=ok thermal=off fps=off（game 档下 gpu/threads 为降级态）
-- 配置路径分工：profiles/perapp/settings.conf 在模块目录 `/data/adb/modules/WY925976742/config/`（perapp 7 个：bilibili/arknights/Yuanshen/cf/pubgmhd/sgame/tv.bili）；`/data/adb/WY925976742/config/` 只有 fas_games.toml
-- USER_CONFIG：`/sdcard/Android/fas-rs/games.toml`（580 B，u0_a268/media_rw）
+- 配置路径分工：profiles/perapp/settings.conf 在模块目录 `/data/adb/modules/WY925976742/config/`（perapp 7 个：bilibili/arknights/Yuanshen/cf/pubgmhd/sgame/tv.bili）；v1.2.0 起 `/data/adb/WY925976742/config/` 不再生成 fas_games.toml
+- USER_CONFIG `/sdcard/Android/fas-rs/games.toml` 已由 v1.2.0 启动脚本清理（仅删除首行为本模块生成标记的文件）
 - **已知异常**：supervisor 全天多条「心跳超时（42s~450s，连续第 1 次）」（01:51-04:13 十条 + 18:53 一次 450s），daemon 均自行恢复；根因待排查（疑与某同步调用阻塞/休眠有关）
 
 ## 10. 已知坑速查表
@@ -226,7 +229,7 @@ echo -:fm_probe > /sys/kernel/tracing/uprobe_events
 |---|---|---|---|
 | 1 | perf-uprobe+BPF 路线损坏 | 见 8.1；建得上、连得上、不触发 | fas-rs 不可用；帧监控走 8.4 |
 | 2 | fas-rs 符号被 Android 17 移除 | 见 8.2 | 无解（路线坏在符号前） |
-| 3 | GPU min/max_freq 只读 | 0444 无 store 回调（驱动级），root 写不了、permissive 无效、chmod 无效 | capability 降级 gpu；game 档 GPU 不干预 |
+| 3 | GPU min/max_freq 权限 | 2026-10-25 记录 0444 只读；2026-10-26 复测 min_freq 为 rw-rw-r--、max_freq 为 rw-r--r--，root 写入 342MHz 成功 | 能力不再降级；若再遇只读，负缓存避免重复 permissive |
 | 4 | /system/lib64 图形栈 uprobe EBUSY | libgui/libEGL/libGLESv2 全被占（libc 却能挂） | 帧监控改挂 vendor adreno 库（8.4） |
 | 5 | tracefs 动态事件不进缓冲 | tracing_on=1 也不记录；trace_pipe EBUSY（Perfetto 常驻）；实例 EACCES | 只读 uprobe_profile 计数器，无时间戳 |
 | 6 | 绑核回读不一致 | RenderThread 期望 6-7 失败 | capability 降级 threads |

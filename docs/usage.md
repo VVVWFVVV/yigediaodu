@@ -84,25 +84,20 @@ thread.bind.GameThread=0-5
 - `mem.drop_caches`：`1`=切到该档时释放页缓存（游戏启动准备；一次性动作）
 - `thread.bind.<线程名前缀>=<CPU列表>`：线程绑核
 - `fps.steps.p0` / `fps.steps.p1`：**每游戏独立稳帧阶梯**（覆盖全局 settings.conf 阶梯；逗号分隔）
-- `fps.enable` / `fps.sample_ms` / `fps.jank_threshold` / `fps.hold_ms`：稳帧参数（per-app 可覆盖全局）
-- `fas.enable`：`1`=该应用的频率维度交给 **fas-rs 帧感知调度**（见下）
-- `fas.target_fps`：目标帧率（30-240，fas-rs 按实际渲染帧率动态匹配）
+- `fps.enable` / `fps.sample_ms` / `fps.jank_threshold` / `fps.hold_ms` / `fps.startup_grace_ms`：稳帧参数（per-app 可覆盖全局）
+- `fps.frame_probe` / `fps.target_fps` / `fps.low_ratio` / `frame.lib_path` / `frame.symbol_off`：帧监控探针参数；`frame.symbol_off` 仅作 ELF 自动解析失败时的兜底
 
-### FAS 帧感知调度（v1.0.17）
+### 帧监控探针（v1.2.0）
 
-捆绑 [fas-rs](https://github.com/shadow3aaa/fas-rs)（eBPF 版，GPL-3.0）——监视实际渲染帧、在帧 deadline 前预调频率，比 jank% 反应式阶梯更精准。**分层不重叠**：
+频率维度由本模块自己的稳帧阶梯管理，不再捆绑第三方 fas-rs。帧信号有两路：
 
-| 层 | 负责方 |
-|---|---|
-| 频率维度（`scaling_min_freq`） | fas-rs（`fas.enable=1` 的应用） |
-| 绑核 / cpuset / IO / 内存 / 温控 / GPU | 本模块（始终） |
+- **adreno uprobe 快信号**：挂 vendor `libEGL_adreno.so` 的 `eglSwapBuffers`，每秒读 `uprobe_profile` 计数差分；与健康基线比，连续 2 次低于 80% 判骤降。计数含设备上其它 GL 消费者，**绝对值可能高于游戏内帧率**，面板在无 framestats 时会标注“（探针估）”，该数值仅作参考。
+- **gfxinfo framestats 慢信号**：每 5 秒解析一次 `dumpsys gfxinfo <pkg> framestats` 的 `FrameCompleted` 时间戳，得到**应用真实 FPS**（不受其它 GL 消费者叠加影响），同时保留卡顿率。很多 Unity/Vulkan/SurfaceView 游戏的 framestats 为空，此时自动回退探针绝对帧率判据；`Total frames rendered < 30` 的启动残片直接忽略。
+- **探针绝对值只在“最近 12 秒确实接近目标帧率”时使用**：和平精英大厅/加载只有 28-111fps，而 target=144，这些低帧不会触发升档；只有游戏真正跑起来后再掉帧才升档。
+- **温控**：只用 CPU/GPU 温区（`cpu-*`/`cpuss-*`/`gpuss-*`）最高温；封顶/解除最小驻留 15 秒，避免温度尖峰导致频率来回跳。
+- **启动宽限**：游戏启动/加载的前 60 秒不因 jank 或低帧升档；探针绝对值的宽限为 120 秒。明日方舟等游戏约 1-2 分钟才进对局，加载界面 10-30fps 不是真实掉帧。
 
-- **配置桥**：per-app 的 `fas.enable`/`fas.target_fps` 由守护进程自动生成 fas-rs 的 `games.toml`（运行时目录 `config/fas_games.toml`），无需手改
-- **模式仲裁**：温控触发 → `powersave`；连续 3 次采样卡顿超标 → `performance`；否则 `balance`（写 `/dev/fas_rs/mode`）
-- **让位条件**是「当前应用 fas 托管」而非「fas-rs 在跑」——非 fas 应用（如 PUBG 默认关）即使 fas-rs 空闲运行也走我们的阶梯
-- **回退**：内核不支持 eBPF 时 fas-rs 启动失败，自动回退内置稳帧阶梯（日志可见）
-- 面板总览「实时」卡片的「帧感知」字段显示接管状态与当前模式
-- **PUBG 默认 `fas.enable=0`**（反作弊体系复杂，保守默认；eBPF 版无 hook，想试手动改 1）
+升档判据为「卡顿率超标或真实 FPS 低或探针骤降」任一；降档要求卡顿率低且真实帧率健康。符号偏移在启动探针时从 ELF `.dynsym` 自动解析（`eglSwapBuffers`），OTA/换库后无需手改配置；解析失败才用 `frame.symbol_off` 兜底。探针启动 20 秒仍无计数会判定符号失效并回退纯卡顿率阶梯。
 
 ## 前台识别
 
@@ -130,7 +125,7 @@ thread.bind.GameThread=0-5
 - CPU 频率：`/sys/devices/system/cpu/cpufreq/policyN/scaling_min_freq`（p0=中核簇 cpu0-5，p1=大核簇 cpu6-7）。**频率吸附**：写入前读取 `scaling_available_frequencies`，把目标值取整到最近合法值——`min_freq` 向上取整（不低于目标，保性能），`max_freq` 封顶向下取整（绝不超过目标，保温控）。真机实测（一加平板 2 Pro）：policy0 合法频率为 384/556/748/960/1152/1363/1555/1785/1996/2227/2400/2745/2918/3072/3321/3532 MHz，policy6 为 1017/1209/1401/1689/1958/2246/2438/2649/2841/3072/3283/3513/3801/4089/4204/4320 MHz。**配置里的频率值必须是合法值**——非法值（如 1708800）会被内核钳位，写后回读不一致触发能力降级（v1.0.13 实测踩坑，v1.0.14 修正配置值 + 引擎吸附双保险）；每次吸附在日志留 INFO（`频率吸附: <节点> <原值> -> <新值>`）
 - cpuset：该内核 cpuset 挂载带 `cpuset_v2_mode`，**文件名是 v2 命名的 `cpus`/`mems`**（不是 v1 的 `cpuset.cpus`），实际挂载点在 `/dev/cpuset`。模块按四候选顺序写入（`/dev/cpuset/<组>/cpuset.cpus` → `/dev/cpuset/<组>/cpus` → `/sys` 两个兜底），首个成功即用；**不做存在性读探测**（SELinux 会拦截 ksu 域读取 cgroup，探测会说谎）；**不会创建节点文件**（写入用无 O_CREAT 的 open，路径错误时明确 ENOENT 失败并落入下一候选）。ColorOS 的 SELinux 会拦截对 cgroup 的读写，模块采用**瞬时 permissive**：写前读 `/sys/fs/selinux/enforce` 原值 → 临时写 0 → 写入 → 恢复原值，全程毫秒级且一定恢复；每次触发在日志里留 INFO（如 `nd_write 经瞬时 permissive 成功: /dev/cpuset/background/cpus（enforce 1→0→1）`）。若仍失败，cpuset 能力显示「已降级」，其余干预不受影响
 - 绑核：`sched_setaffinity` + `/proc/<tid>/status` 回读自证。线程名**前缀匹配**，UE4 的 `TaskGraph` 前缀覆盖全部变体（`TaskGraphNP 0`/`TaskGraphThread`/`TaskGraphWorker`——真机实测和平精英的线程名是 `TaskGraphNP 0`，v1.0.13 用 `TaskGraphThread` 前缀匹配不到它）
-- 温控：只按温度阈值**封顶** `scaling_max_freq`，**绝不停温控服务**（停服务有失控风险）
+- 温控：只按 CPU/GPU 温区（`cpu-*`/`cpuss-*`/`gpuss-*`）最高温**封顶** `scaling_max_freq`，**绝不停温控服务**（停服务有失控风险）；电池/充电/PMIC 最高温仅在面板展示，不参与 CPU 封顶（v1.2.0 修正：旧版取全机最高温，真机 pmih 61℃ 会把 40℃ 的 CPU 误封顶）
 - sched_ext：只读探测，不加载（内核版本耦合 + 与厂商 WALT 冲突，风险不可控）
 
 ## 从源码构建（可选）
@@ -143,5 +138,5 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
-host 测试在 WSL 里对模拟设备树跑 95 项用例；前端有 22 项 Node 冒烟测试。
+host 测试在 WSL 里对模拟设备树跑 169 项用例；前端有 36 项 Node 冒烟测试。
 改 `src/*.cpp` 后重新跑 `build.ps1` 即可，测试全过才允许打包。

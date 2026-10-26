@@ -105,11 +105,11 @@ std::vector<int> find_pkg_pids(const std::string& pkg) {
 }  // namespace
 
 // ============================================================
-// 公开接口（engine.hpp）：基线快照/后缀还原 + fas 频率让位
+// 公开接口（engine.hpp）：基线快照/后缀还原
 // ============================================================
 
 // 基线快照：首次写某节点前记录当前值（同一节点只记一次）。
-// 只读记录不写入——fas-rs 接管频率前快照现场用。
+// 只读记录不写入。
 void baseline_snapshot_node(const std::string& path) {
     std::ifstream in(baseline_file());
     std::string line;
@@ -129,32 +129,6 @@ void baseline_snapshot_node(const std::string& path) {
     std::fprintf(f, "%s=%s\n", path.c_str(), cur.c_str());
     std::fclose(f);
 }
-
-// 按路径后缀从基线还原（如 "scaling_min_freq" 匹配所有策略组），返回成功数。
-// 供 fas-rs 停止后把频率现场还原到接管前的值。
-int baseline_restore_matching(const std::string& suffix) {
-    std::ifstream in(baseline_file());
-    std::string line;
-    int ok = 0;
-    while (std::getline(in, line)) {
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        std::string path = line.substr(0, eq);
-        std::string val = line.substr(eq + 1);
-        if (path.size() < suffix.size()) continue;
-        if (path.compare(path.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
-        if (nd_write(path, val)) ++ok;
-    }
-    return ok;
-}
-
-// 频率下限让位（v1.0.17）：daemon 在落地档位前按「当前应用 fas 托管」设置。
-// apply_profile 的 cpu.min_freq handler 与 fps_tick 的阶梯共用此状态——
-// 让位条件是「当前应用交给 fas-rs 管频率」，不是「fas-rs 进程在跑」
-// （非 fas 游戏即使 fas-rs 空闲运行也走我们的阶梯）。
-static bool g_freq_defer_fas = false;
-void set_freq_defer_fas(bool defer) { g_freq_defer_fas = defer; }
-bool freq_defer_fas() { return g_freq_defer_fas; }
 
 // 频率吸附：将目标频率取整到 <dir>/<avail_node> 中最近的可用值。
 // 真机教训（v1.0.12 实测）：配置值 1708800 不在真机频率表中（policy6 合法
@@ -337,12 +311,6 @@ ApplyResult apply_profile(const Profile& prof, const std::string& pkg) {
                                                      "（原值不在可用频率表）");
                     }
                 }
-                if (g_freq_defer_fas) {
-                    // v1.0.17：fas-rs 正在管理当前应用的频率维度（帧感知预调），
-                    // 我们的静态频率下限让位——否则会挡住 fas-rs 的降频空间
-                    log_line(LogLevel::Info, "频率下限让位 fas-rs: " + node);
-                    continue;
-                }
                 if (write_with_baseline(node, effective)) {
                     ++r.applied;
                     set_capability("cpu", "ok");
@@ -410,6 +378,14 @@ ApplyResult apply_profile(const Profile& prof, const std::string& pkg) {
                 while ((e = ::readdir(d)) != nullptr) {
                     std::string name = e->d_name;
                     if (name == "." || name == "..") continue;
+                    // v1.2.0：只调真实存储设备。真机 /sys/block 有 118 个条目，
+                    // 其中 54 个 loop、16 个 ram、1 个 zram——给它们写 read_ahead
+                    // 没有意义，却让每次切档的基线/还原放大 3 倍。实测过滤后
+                    // 条目从 118 降到约 44（38 dm + 6 sd）。
+                    if (name.rfind("loop", 0) == 0 || name.rfind("ram", 0) == 0 ||
+                        name.rfind("zram", 0) == 0 || name.rfind("sr", 0) == 0) {
+                        continue;
+                    }
                     std::string node = "/sys/block/" + name + "/queue/read_ahead_kb";
                     if (nd_exists(node) && write_with_baseline(node, val)) any = true;
                 }

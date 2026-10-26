@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host:
+    name: Host build + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build host binary
+        run: |
+          g++ -std=c++17 -g -O0 -Wall -Wextra src/*.cpp -o build-host/xindiaodud
+      - name: Host tests (mock device tree)
+        run: bash test/run_tests.sh
+      - name: Frontend smoke tests
+        run: node test/js_smoke.js
+
+  sanitizers:
+    name: ASan/UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with sanitizers
+        run: |
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+            src/*.cpp -o build-host/xindiaodud
+      - name: Host tests under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1
+        run: bash test/run_tests.sh
+
+  device:
+    name: Device build + package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK and build tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;30.0.16248370"
+      - name: Cross compile (arm64-v8a)
+        run: |
+          cmake -S . -B build-device -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_SDK_ROOT/ndk/30.0.16248370/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+            -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-device
+      - name: Stage binary and pack
+        run: |
+          mkdir -p libs/arm64-v8a
+          cp build-device/xindiaodud libs/arm64-v8a/xindiaodud
+          chmod +x libs/arm64-v8a/xindiaodud tools/pack.sh
+          bash tools/pack.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/*.zip
